@@ -2,18 +2,22 @@
   "_说明": "项目词表模板。复制到项目里改名 terms.json，按学科与论文替换后传 --terms。所有字段可省略。提供的词表项会自动与脚本内置默认规则合并（做增量补充，不会覆盖抹除内置通用规则）。",
   "_写法": "值是正则片段，脚本按子串搜索，不要用 ^ $ 锚定整串。JSON 中反斜杠需双写。",
 
+  "own_methods": [
+    "MyFramework",
+    "MyModel"
+  ],
+
   "codename": [
-    "\\bsty\\d{2}\\b",
-    "\\bkp\\d\\b",
-    "\\bcnt\\d{2}\\b",
+    "\\bmod[A-Z]\\d\\b",
+    "\\bexp_\\d+\\b",
     "per-family",
     "best-effort"
   ],
 
   "bare_en": [
-    "\\bfloor\\b",
-    "multi-shot",
-    "layout-leak",
+    "\\bbenchmark\\b",
+    "zero-shot",
+    "few-shot",
     "in-context"
   ],
 
@@ -117,13 +121,37 @@
     "不是对方法本身的否定"
   ],
 
+  "extra_acr_stop": [
+    "DUT",
+    "THU",
+    "PKU",
+    "SD",
+    "EDM",
+    "DPM"
+  ],
+
   "term_pairs": [
     ["词元", "标记(?!语言)"],
     ["提示词", "提示语"],
     ["主干", "骨干"],
     ["隐空间", "潜空间"],
-    ["风格迁移", "风格转换"],
     ["保真度", "真实度"],
-    ["微调", "调优"]
+    ["微调", "调优"],
+    ["风格迁移", "风格转换"]
+  ],
+
+  "composite_metrics": [
+    {
+      "name": "F1",
+      "header_match": ["F1", "F-score", "F1-score"],
+      "components": ["Precision", "Recall"],
+      "formula": "2 * Precision * Recall / (Precision + Recall)",
+      "tolerance": 0.02
+    }
+  ],
+
+  "empty_front_cmds": [
+    "defenddate",
+    "englishadvisor"
   ]
 }

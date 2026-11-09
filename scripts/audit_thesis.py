@@ -18,6 +18,7 @@
     python audit_thesis.py <tex_root> [--terms terms.json] [-o report.md] [--log build/x.log]
 """
 import argparse
+import ast
 import json
 import math
 import re
@@ -127,13 +128,23 @@ CODE_ENVS = (
 )
 
 ACR_STOP = {
-    "ACM", "IEEE", "CVPR", "ICCV", "ECCV", "AAAI", "ICLR", "ICML", "NIPS", "SIGGRAPH",
-    "COCO", "GPU", "CPU", "TPU", "API", "PDF", "DOI", "URL", "PNG", "JPG", "JPEG", "RGB", "RGBA",
-    "TPAMI", "DPM", "FF", "MLP", "CNN", "RNN", "GAN", "VAE", "KL", "L2", "L1", "ViT", "LLM",
+    # 国际学术出版与顶级会议/期刊
+    "ACM", "IEEE", "CVPR", "ICCV", "ECCV", "AAAI", "ICLR", "ICML", "NIPS", "NEURIPS",
+    "ACL", "EMNLP", "NAACL", "KDD", "SIGGRAPH", "TPAMI", "TIP", "IJCV", "JMLR",
+    # 计算机基础、硬件与网络协议
+    "CPU", "GPU", "TPU", "NPU", "RAM", "ROM", "SSD", "HDD", "FPGA", "ASIC", "DSP",
+    "OS", "API", "SDK", "CLI", "GUI", "PDF", "PNG", "JPG", "JPEG", "RGB", "RGBA",
+    "DOI", "URL", "URI", "HTTP", "HTTPS", "TCP", "UDP", "IP", "DNS", "FTP", "SSH",
+    "JSON", "XML", "HTML", "ASCII", "UTF", "CUDA", "SIMD", "RTX", "NVIDIA",
+    # 通用度量单位
     "GB", "MB", "KB", "TB", "PB", "FPS", "HZ", "KHZ", "MHZ", "GHZ", "MS", "SEC", "MIN",
-    "AI", "ML", "DL", "NLP", "CV", "RL", "SOTA", "CUDA", "ASCII", "UTF", "BERT", "GPT",
-    # 领域通用指标、视觉基线与硬件宏包
-    "FID", "LPIPS", "PSNR", "SSIM", "SD", "SDXL", "EDM", "IP", "DUT", "RTX", "NVIDIA",
+    # 人工智能与通用算法
+    "AI", "ML", "DL", "NLP", "CV", "RL", "SOTA", "LLM", "BERT", "GPT",
+    "CNN", "RNN", "GAN", "VAE", "MLP", "GNN", "SVM", "KNN", "PCA", "SGD", "ADAM",
+    "ViT", "KL", "L1", "L2", "CE", "BCE", "COCO", "CIFAR",
+    # 领域通用评价指标（视觉/语言/检索等）
+    "FID", "LPIPS", "PSNR", "SSIM", "BLEU", "ROUGE", "AUC", "ROC", "MAP", "AP", "F1",
+    "MSE", "MAE", "RMSE", "IoU", "mIoU",
 }
 
 DEFAULT_TERM_PAIRS = [
@@ -141,10 +152,94 @@ DEFAULT_TERM_PAIRS = [
     ("提示词", r"提示语(?!义)"),
     ("主干", "骨干"),
     ("隐空间", "潜空间"),
-    ("风格迁移", "风格转换"),
     ("保真度", "真实度"),
     ("微调", "调优"),
 ]
+
+# 内置常见复合指标定义规范（支持通过 terms.json 的 composite_metrics 字段任意扩充）
+DEFAULT_COMPOSITE_RULES = [
+    {
+        "name": "ArtFID",
+        "header_match": ["ArtFID"],
+        "components": ["LPIPS", "FID"],
+        "formula": "(1 + LPIPS) * (1 + FID)",
+        "tolerance": 0.15,
+    },
+    {
+        "name": "SCH",
+        "header_match": ["SCH"],
+        "components": ["CSD", "CLIP-I"],
+        "formula": "sqrt(CSD * CLIP-I)",
+        "tolerance": 0.05,
+    },
+    {
+        "name": "F1",
+        "header_match": ["F1", "F-score", "F1-score"],
+        "components": ["P", "R"],
+        "formula": "2 * P * R / (P + R)",
+        "tolerance": 0.02,
+    },
+]
+
+
+def safe_eval_expr(expr_str: str, var_dict: dict) -> float:
+    """安全解析并计算简单数学表达式，仅允许四则运算与 math 白名单函数。"""
+    allowed_nodes = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name,
+        ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd, ast.Pow,
+        ast.Call, ast.Load
+    )
+    tree = ast.parse(expr_str, mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"不支持的语法节点: {type(node).__name__}")
+
+    allowed_funcs = {
+        "sqrt": math.sqrt,
+        "log": math.log,
+        "exp": math.exp,
+        "abs": abs,
+        "min": min,
+        "max": max,
+    }
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        elif isinstance(node, ast.Constant):
+            return float(node.value)
+        elif isinstance(node, ast.Name):
+            if node.id in var_dict:
+                return float(var_dict[node.id])
+            elif node.id in allowed_funcs:
+                return allowed_funcs[node.id]
+            raise ValueError(f"未找到变量: {node.id}")
+        elif isinstance(node, ast.BinOp):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            elif isinstance(node.op, ast.Sub):
+                return left - right
+            elif isinstance(node.op, ast.Mult):
+                return left * right
+            elif isinstance(node.op, ast.Div):
+                return left / right if right != 0 else 0.0
+            elif isinstance(node.op, ast.Pow):
+                return left ** right
+        elif isinstance(node, ast.UnaryOp):
+            val = _eval(node.operand)
+            if isinstance(node.op, ast.USub):
+                return -val
+            elif isinstance(node.op, ast.UAdd):
+                return val
+        elif isinstance(node, ast.Call):
+            func = _eval(node.func)
+            args = [_eval(a) for a in node.args]
+            return func(*args)
+        raise ValueError("不支持的操作")
+
+    return _eval(tree)
 
 
 def find_master_tex(root: Path) -> Path | None:
@@ -169,26 +264,40 @@ def find_master_tex(root: Path) -> Path | None:
 
 
 def get_tex_structure(root: Path):
-    """解析主文件物理包含顺序，区分正文包含文件与未引用的孤立文件。"""
+    """解析主文件物理包含顺序（递归支持嵌套目录与子文件包含），区分正文包含文件与未引用的孤立文件。"""
     master = find_master_tex(root)
     ordered = []
     seen = set()
 
-    if master:
-        ordered.append(master)
-        seen.add(master.resolve())
-        m_txt = strip_comments(master.read_text(encoding="utf-8", errors="ignore"))
-        for m in re.finditer(r"\\(?:include|input)\{([^}]+)\}", m_txt):
-            target = m.group(1).strip()
-            if not target.endswith(".tex"):
-                target_tex = target + ".tex"
-            else:
-                target_tex = target
-            for cand in ((master.parent / target_tex).resolve(), (root / target_tex).resolve()):
-                if cand.exists() and cand not in seen:
+    def resolve_target(base_dir: Path, target: str) -> Path | None:
+        target = target.strip()
+        if not target.endswith(".tex"):
+            target_tex = target + ".tex"
+        else:
+            target_tex = target
+        for cand in ((base_dir / target_tex).resolve(), (root / target_tex).resolve()):
+            if cand.exists():
+                return cand
+        return None
+
+    def traverse(file_path: Path):
+        try:
+            content = strip_comments(file_path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            return
+        for m in re.finditer(r"\\(?:include|input)\{([^}]+)\}", content):
+            raw_target = m.group(1).strip()
+            for sub_target in raw_target.split(","):
+                cand = resolve_target(file_path.parent, sub_target)
+                if cand and cand.resolve() not in seen:
+                    seen.add(cand.resolve())
                     ordered.append(cand)
-                    seen.add(cand)
-                    break
+                    traverse(cand)
+
+    if master:
+        seen.add(master.resolve())
+        ordered.append(master)
+        traverse(master)
 
     unincluded = []
     for p in root.rglob("*.tex"):
@@ -290,15 +399,31 @@ def load_terms(path: str, root: Path = None):
         vals = t.get(k) or []
         if vals:
             out[k] = "|".join("(?:%s)" % v for v in vals)
+
+    if "own_methods" in t and isinstance(t["own_methods"], list):
+        out["own_methods"] = t["own_methods"]
     if "term_pairs" in t and isinstance(t["term_pairs"], list):
         out["term_pairs"] = t["term_pairs"]
+    if "acr_stop" in t and isinstance(t["acr_stop"], list):
+        out["acr_stop"] = set(t["acr_stop"])
+    if "extra_acr_stop" in t and isinstance(t["extra_acr_stop"], list):
+        out["extra_acr_stop"] = set(t["extra_acr_stop"])
+    if "composite_metrics" in t and isinstance(t["composite_metrics"], list):
+        out["composite_metrics"] = t["composite_metrics"]
+    if "empty_front_cmds" in t and isinstance(t["empty_front_cmds"], list):
+        out["empty_front_cmds"] = t["empty_front_cmds"]
+
     return out
 
 
-def verify_composite_tables(files, texts, rel):
-    """机械核算表格中复合指标（ArtFID、SCH）公式自洽性。"""
+def verify_composite_tables(files, texts, rel, composite_rules=None):
+    """机械核算表格中复合指标（如 ArtFID、SCH、F1 或自定义公式）数值自洽性。"""
+    if composite_rules is None:
+        composite_rules = DEFAULT_COMPOSITE_RULES
+
     results = []
     inconsistencies = []
+
     for p in files:
         t = texts[p]
         for tm in re.finditer(r"\\begin\{tabular\}\s*\{([^}]+)\}([\s\S]*?)\\end\{tabular\}", t):
@@ -307,65 +432,87 @@ def verify_composite_tables(files, texts, rel):
             if not lines:
                 continue
             header = lines[0]
-            # 1. 验算 ArtFID = (1 + LPIPS) * (1 + FID)
-            if "ArtFID" in header and "FID" in header and "LPIPS" in header:
-                cols = [c.strip() for c in header.split("&")]
-                idx_art = next((i for i, c in enumerate(cols) if "ArtFID" in c), -1)
-                idx_fid = next((i for i, c in enumerate(cols) if re.search(r"\bFID\b", c)), -1)
-                idx_lp = next((i for i, c in enumerate(cols) if "LPIPS" in c and "gray" not in c), -1)
-                if idx_art != -1 and idx_fid != -1 and idx_lp != -1:
-                    row_ok, row_fail = 0, 0
-                    for row_idx, row in enumerate(lines[1:], start=2):
-                        if "&" not in row:
-                            continue
-                        cells = [re.sub(r"\\textbf\{([^}]+)\}", r"\1", c.strip()) for c in row.split("&")]
-                        if len(cells) > max(idx_art, idx_fid, idx_lp):
-                            m_art = re.search(r"\d+(?:\.\d+)?", cells[idx_art])
-                            m_fid = re.search(r"\d+(?:\.\d+)?", cells[idx_fid])
-                            m_lp = re.search(r"\d+(?:\.\d+)?", cells[idx_lp])
-                            if m_art and m_fid and m_lp:
-                                v_art = float(m_art.group(0))
-                                v_fid = float(m_fid.group(0))
-                                v_lp = float(m_lp.group(0))
-                                calc = (1.0 + v_lp) * (1.0 + v_fid)
-                                if abs(calc - v_art) > 0.15:
-                                    inconsistencies.append(
-                                        f"{rel[p]} 行「{cells[0]}」: ArtFID={v_art}，代入公式计算为 {calc:.3f}（差值 {abs(calc - v_art):.3f}）"
-                                    )
-                                    row_fail += 1
-                                else:
-                                    row_ok += 1
-                    results.append(f"ArtFID 表 ({rel[p]}): {row_ok} 行自洽，{row_fail} 行不符")
+            header_cols = [c.strip() for c in header.split("&")]
+            clean_cols = [re.sub(r"(\\[a-zA-Z]+|\{|\}|\$)", "", c).strip() for c in header_cols]
 
-            # 2. 验算 SCH = sqrt(CSD * CLIP-I)
-            if "SCH" in header and "CSD" in header and "CLIP-I" in header:
-                cols = [c.strip() for c in header.split("&")]
-                idx_sch = next((i for i, c in enumerate(cols) if "SCH" in c), -1)
-                idx_csd = next((i for i, c in enumerate(cols) if "CSD" in c), -1)
-                idx_clip = next((i for i, c in enumerate(cols) if "CLIP-I" in c), -1)
-                if idx_sch != -1 and idx_csd != -1 and idx_clip != -1:
-                    row_ok, row_fail = 0, 0
-                    for row_idx, row in enumerate(lines[1:], start=2):
-                        if "&" not in row:
-                            continue
-                        cells = [re.sub(r"\\textbf\{([^}]+)\}", r"\1", c.strip()) for c in row.split("&")]
-                        if len(cells) > max(idx_sch, idx_csd, idx_clip):
-                            m_sch = re.search(r"\d+(?:\.\d+)?", cells[idx_sch])
-                            m_csd = re.search(r"\d+(?:\.\d+)?", cells[idx_csd])
-                            m_clip = re.search(r"\d+(?:\.\d+)?", cells[idx_clip])
-                            if m_sch and m_csd and m_clip:
-                                v_sch = float(m_sch.group(0))
-                                v_csd = float(m_csd.group(0))
-                                v_clip = float(m_clip.group(0))
-                                calc = math.sqrt(v_csd * v_clip)
-                                if abs(calc - v_sch) > 0.05:
-                                    inconsistencies.append(
-                                        f"{rel[p]} 行「{cells[0]}」: SCH={v_sch}，代入公式计算为 {calc:.3f}（差值 {abs(calc - v_sch):.3f}）"
-                                    )
-                                    row_fail += 1
-                                else:
-                                    row_ok += 1
-                    results.append(f"SCH 表 ({rel[p]}): {row_ok} 行自洽，{row_fail} 行不符")
+            for rule in composite_rules:
+                target_name = rule["name"]
+                header_matches = rule.get("header_match", [target_name])
+                idx_target = next(
+                    (i for i, c in enumerate(clean_cols) if any(m == c or re.search(r"\b" + re.escape(m) + r"\b", c, re.I) for m in header_matches)),
+                    -1
+                )
+                if idx_target == -1:
+                    continue
+
+                components = rule["components"]
+                comp_indices = {}
+                for comp in components:
+                    idx = next(
+                        (i for i, c in enumerate(clean_cols) if re.search(r"\b" + re.escape(comp) + r"\b", c, re.I) and "gray" not in c.lower()),
+                        -1
+                    )
+                    if idx != -1:
+                        comp_indices[comp] = idx
+
+                # 必须所有组件都在表头中存在且列索引互不相同
+                if len(comp_indices) != len(components):
+                    continue
+                if idx_target in comp_indices.values():
+                    continue
+
+                # 映射变量名并转换表达式
+                sanitized_formula = rule["formula"]
+                comp_var_map = {}
+                for comp in components:
+                    var_name = re.sub(r"[^A-Za-z0-9_]", "_", comp)
+                    comp_var_map[comp] = var_name
+                    sanitized_formula = re.sub(r"\b" + re.escape(comp) + r"\b", var_name, sanitized_formula)
+
+                tolerance = rule.get("tolerance", 0.05)
+                row_ok, row_fail = 0, 0
+
+                for row_idx, row in enumerate(lines[1:], start=2):
+                    if "&" not in row:
+                        continue
+                    cells = [re.sub(r"\\textbf\{([^}]+)\}", r"\1", c.strip()) for c in row.split("&")]
+                    req_max = max([idx_target] + list(comp_indices.values()))
+                    if len(cells) <= req_max:
+                        continue
+
+                    m_target = re.search(r"\d+(?:\.\d+)?", cells[idx_target])
+                    if not m_target:
+                        continue
+                    v_target = float(m_target.group(0))
+
+                    v_dict = {}
+                    all_comp_ok = True
+                    for comp in components:
+                        m_c = re.search(r"\d+(?:\.\d+)?", cells[comp_indices[comp]])
+                        if not m_c:
+                            all_comp_ok = False
+                            break
+                        v_dict[comp_var_map[comp]] = float(m_c.group(0))
+
+                    if not all_comp_ok:
+                        continue
+
+                    try:
+                        calc = safe_eval_expr(sanitized_formula, v_dict)
+                    except Exception:
+                        continue
+
+                    if abs(calc - v_target) > tolerance:
+                        row_name = re.sub(r"(\\[a-zA-Z]+|\{|\}|\$)", "", cells[0]).strip()
+                        inconsistencies.append(
+                            f"{rel[p]} 行「{row_name}」: {target_name}={v_target}，代入公式计算为 {calc:.3f}（差值 {abs(calc - v_target):.3f}）"
+                        )
+                        row_fail += 1
+                    else:
+                        row_ok += 1
+
+                if row_ok + row_fail > 0:
+                    results.append(f"{target_name} 表 ({rel[p]}): {row_ok} 行自洽，{row_fail} 行不符")
 
     return results, inconsistencies
 
@@ -415,16 +562,28 @@ def main() -> int:
 
     # 2. 方法章主体归属缺失（仅在第 3 章及以后的方法与核心分析章检查）
     bad_attr = []
+    own_methods = terms.get("own_methods") or []
+    own_methods_rx = None
+    if own_methods:
+        own_methods_rx = r"(?:" + "|".join(re.escape(m) for m in own_methods) + r")[^。]{0,25}(?:由|被|在文献|在论文)[^。]{0,10}(?:提出|发表|开源|设计)"
+
     for p in files:
         nums = re.findall(r"\d+", p.stem)
         ch_num = int(nums[0]) if nums else 0
-        if "chapter" in p.stem.lower() and ch_num >= 3:
+        is_ch = any(k in p.stem.lower() for k in ["chapter", "chap", "ch"]) or ("chapters" in [part.lower() for part in p.parts])
+        if is_ch and ch_num >= 3:
             t = texts[p]
             for pos, s in all_hits(SUBJECT_ATTR_DEFAULT, t):
                 start = max(0, pos - 15)
                 end = min(len(t), pos + len(s) + 25)
                 snip = t[start:end].replace("\n", " ").strip()
                 bad_attr.append((rel[p], line_of(t, pos), s, snip))
+            if own_methods_rx:
+                for pos, s in all_hits(own_methods_rx, t):
+                    start = max(0, pos - 15)
+                    end = min(len(t), pos + len(s) + 25)
+                    snip = t[start:end].replace("\n", " ").strip()
+                    bad_attr.append((rel[p], line_of(t, pos), f"自身工作被外指「{s}」", snip))
     W(f"- 方法章主体归属缺失：**{len(bad_attr)}** 处（将自己工作写成外部复现或主体剥离）")
     for r, ln, s, snip in bad_attr[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
@@ -438,10 +597,10 @@ def main() -> int:
             defs = [lab for lab in re.findall(r"\\label\{((?:fig|tab|alg):[^}]+)\}", t) if lab.startswith(prefix)]
             idx = {lab: i for i, lab in enumerate(defs)}
             first = {}
-            for m in re.finditer(r"\\ref\{((?:fig|tab|alg):[^}]+)\}", t):
-                lab = m.group(1)
-                if lab.startswith(prefix):
-                    first.setdefault(lab, m.start())
+            for m in re.finditer(r"\\(?:ref|cref|Cref|autoref|eqref|pageref)\{([^}]+)\}", t):
+                for lab in [x.strip() for x in m.group(1).split(",")]:
+                    if lab.startswith(prefix):
+                        first.setdefault(lab, m.start())
             prev = -1
             for lab, pos in sorted(first.items(), key=lambda kv: kv[1]):
                 if lab in idx and idx[lab] < prev:
@@ -451,21 +610,35 @@ def main() -> int:
     for r, ln, lab in bad_float_order[:10]:
         W(f"  - {r}:{ln} `{lab}`")
 
-    # 4. 指代未带 \ref 且周围无紧邻浮动体（排除特征图/计算图/散列表等学科专有数据结构）
+    # 4. 指代未带 \ref 且周围无紧邻浮动体（排除特征图/计算图/散列表/混淆矩阵/热力图等学科专有数据结构与图表类型）
     ghost = []
-    ghost_rx = r"((?<!散列|哈希|符号)表中|上表|下表|(?<!特征|计算|网络|因果|关系|拓扑)图中|上图|下图|见表|见图)"
+    ghost_rx = r"(?:表中|上表|下表|图中|上图|下图|见表|见图)"
+    ghost_exclude_prefixes = (
+        "散列", "哈希", "符号", "对照", "统计", "记录", "邻接", "状态", "路由", "查找",
+        "配置", "索引", "跳转", "真值", "特征", "计算", "网络", "因果", "关系", "拓扑",
+        "热力", "散点", "分布", "折线", "雷达", "混淆", "流程", "时序", "示意", "架构",
+        "结构", "数据流", "甘特", "框", "柱状", "箱线", "点云", "矩阵"
+    )
     for p in files:
         t = texts[p]
         for m in re.finditer(ghost_rx, t):
+            pre = t[max(0, m.start() - 6): m.start()]
+            if any(pre.endswith(ex) for ex in ghost_exclude_prefixes):
+                continue
             win = t[max(0, m.start() - 400): min(len(t), m.start() + 400)]
-            # 若窗口内包含 \ref 或紧邻各类表格/插图环境，视为正常就近指代
+            # 若窗口内包含各类引用宏或紧邻各类表格/插图环境，视为正常就近指代
             if (r"\ref{" in win or
+                r"\cref{" in win or
+                r"\Cref{" in win or
+                r"\autoref{" in win or
+                r"\pageref{" in win or
                 r"\begin{table" in win or
                 r"\begin{figure" in win or
                 r"\begin{tabular" in win or
                 r"\begin{sideway" in win or
                 r"\begin{wrapfigure" in win or
-                r"\begin{algorithm" in win):
+                r"\begin{algorithm" in win or
+                r"\begin{minipage" in win):
                 continue
             ghost.append((rel[p], line_of(t, m.start()), m.group(0)))
     W(f"- 「表中/图中」脱离浮动体悬空指代：**{len(ghost)}** 处（前后400字内无 `\\ref` 且无浮动体环境）")
@@ -475,7 +648,13 @@ def main() -> int:
     # 5. 未引用浮动体与文献
     all_text = "\n".join(texts[p] for p in ordered_files)
     labels = set(re.findall(r"\\label\{((?:fig|tab|alg):[^}]+)\}", all_text))
-    refs = set(re.findall(r"\\ref\{((?:fig|tab|alg):[^}]+)\}", all_text))
+    raw_refs = re.findall(r"\\(?:ref|cref|Cref|autoref|eqref|pageref)\{([^}]+)\}", all_text)
+    refs = set()
+    for item in raw_refs:
+        for x in item.split(","):
+            lab = x.strip()
+            if lab.startswith(("fig:", "tab:", "alg:")):
+                refs.add(lab)
     uncited_floats = labels - refs
     W(f"- 未被引用的浮动体：**{len(uncited_floats)}** 个" + (f" → {sorted(uncited_floats)[:6]}" if uncited_floats else ""))
 
@@ -491,9 +670,13 @@ def main() -> int:
             # 排除 @comment, @string, @preamble
             keys |= set(re.findall(r"@(?!(?:comment|string|preamble)\b)\w+\s*\{\s*([^,\s]+)\s*,", raw_bib, re.I))
         cited = set()
-        # 兼容各类 cite 命令：\cite, \upcite, \citep, \citet, \nocite 等
-        for k in re.findall(r"\\(?:up?cite|citep|citet|nocite|citeauthor|citeyear)\{([^}]+)\}", all_text):
-            cited |= {x.strip() for x in k.split(",")}
+        # 兼容各类标准与宏包引用命令：\cite, \upcite, \citep, \citet, \nocite, \autocite, \parencite, \textcite 等
+        raw_cites = re.findall(r"\\(?:cite|upcite|citep|citet|nocite|citeauthor|citeyear|autocite|parencite|textcite|footcite)\{([^}]+)\}", all_text)
+        for k in raw_cites:
+            for x in k.split(","):
+                val = x.strip()
+                if val:
+                    cited.add(val)
         uncited_bibs = keys - cited
         W(f"- 参考文献：{len(keys)} 条，正文引用 {len(cited)} 条，未引用 **{len(uncited_bibs)}** 条"
           + (f" → {sorted(uncited_bibs)[:5]}" if uncited_bibs else ""))
@@ -501,7 +684,10 @@ def main() -> int:
         W(f"- 参考文献：未在 `{root}` 下找到 .bib 文件（跳过未引用文献检查）")
 
     # 6. 复合指标公式逐行验算（自洽性核算）
-    tbl_summaries, tbl_incons = verify_composite_tables(ordered_files, texts, rel)
+    user_rules = DEFAULT_COMPOSITE_RULES.copy()
+    if "composite_metrics" in terms and isinstance(terms["composite_metrics"], list):
+        user_rules = terms["composite_metrics"] + user_rules
+    tbl_summaries, tbl_incons = verify_composite_tables(ordered_files, texts, rel, composite_rules=user_rules)
     W(f"- 复合指标公式逐行验算：**{len(tbl_incons)}** 处不自洽"
       + (f"（已核算 {len(tbl_summaries)} 张复合指标表，全部符合定义公式）" if not tbl_incons else ""))
     for inc in tbl_incons[:6]:
@@ -528,7 +714,10 @@ def main() -> int:
     for p in files:
         t = texts[p]
         spans = non_prose_spans(t)
-        for m in re.finditer(r"(?<![\\$])\b([A-Za-z]{1,2})\s*=\s*(\d+(?:\.\d+)?)", t):
+        # 屏蔽 LaTeX 可选参数（如 [width=0.8\textwidth]）与命令
+        clean_t = re.sub(r"\[[^\]]*\]", lambda m: " " * len(m.group(0)), t)
+        clean_t = re.sub(r"\\[a-zA-Z]+", lambda m: " " * len(m.group(0)), clean_t)
+        for m in re.finditer(r"(?<![\\$a-zA-Z])([A-Za-z]{1,2})\s*=\s*(\d+(?:\.\d+)?)", clean_t):
             if in_spans(spans, m.start()):
                 continue
             bare_math.append((rel[p], line_of(t, m.start()), m.group(0)))
@@ -536,7 +725,7 @@ def main() -> int:
 
     # 9. 缩写首现未定义（区分作者未定义缩写 vs 已正规引用的外部文献基线）
     body_files = [p for p in ordered_files if not any(x in p.stem.lower() for x in ["denotation", "pub", "thanks", "title", "cover"])]
-    deno_file = next((p for p in files if "denotation" in p.stem.lower()), None)
+    deno_file = next((p for p in files if any(x in p.stem.lower() for x in ["denotation", "symbol", "notation", "abbr"])), None)
     deno_text = deno_file.read_text(encoding="utf-8", errors="ignore") if deno_file else ""
 
     body_clean_chunks = []
@@ -551,23 +740,24 @@ def main() -> int:
         masked = "".join(chars)
         # 屏蔽 LaTeX 命令与键名，防止宏包名或模版名泄露为正文缩写
         masked = re.sub(r"\\(?:documentclass|usepackage)(?:\[[^\]]*\])?\{[^}]*\}", " ", masked)
-        masked = re.sub(r"\\(?:cite|upcite|label|ref|pageref|input|include|bibliography|bibliographystyle)\{[^}]*\}", " ", masked)
+        masked = re.sub(r"\\(?:cite|upcite|label|ref|cref|Cref|autoref|pageref|input|include|bibliography|bibliographystyle)\{[^}]*\}", " ", masked)
         masked = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", masked)
         body_clean_chunks.append(masked)
         body_raw_chunks.append(t)
     all_body_clean = "\n".join(body_clean_chunks)
     all_body_raw = "\n".join(body_raw_chunks)
 
+    user_acr_stop = ACR_STOP | terms.get("acr_stop", set()) | terms.get("extra_acr_stop", set())
     undef = []
     cited_ext = []
     seen_ab = set()
     for m in re.finditer(r"(?<![A-Za-z])[A-Z]{2,6}(?![A-Za-z])", all_body_clean):
         ab = m.group(0)
-        if ab in ACR_STOP or ab in seen_ab:
+        if ab in user_acr_stop or ab in seen_ab:
             continue
         seen_ab.add(ab)
         # 若在符号表中已有收录（无论是正文环境还是 \mathrm 等数学环境），不报错
-        if deno_text and re.search(r"(?:\\mathrm\{|\\operatorname\{|(?<![A-Za-z]))" + re.escape(ab) + r"(?:\}|(?![A-Za-z]))", deno_text):
+        if deno_text and re.search(r"(?:\\mathrm\{|\\operatorname\{|\\textbf\{|(?<![A-Za-z]))" + re.escape(ab) + r"(?:\}|(?![A-Za-z]))", deno_text):
             continue
         m_first = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_clean)
         if not m_first:
@@ -575,14 +765,14 @@ def main() -> int:
         first = m_first.start()
         win = all_body_clean[max(0, first - 300): first + 200]
         # 兼容正文双向定义：全称（缩写）与 缩写（全称），以及表示、定义为、即等引导词
-        rx_def = r"(?:（[^）]*{0}[^）]*）|{0}\s*（[^）]+）|\([^)]*{0}[^)]*\)|{0}\s*\([^)]+\)|全称|定义为|表示|衡量|即|简记|记为|简称)".format(re.escape(ab))
+        rx_def = r"(?:（[^）]*{0}[^）]*）|{0}\s*（[^）]+）|\([^)]*{0}[^)]*\)|{0}\s*\([^)]+\)|全称|定义为|表示|衡量|即|简记|记为|简称|代表)".format(re.escape(ab))
         if re.search(rx_def, win):
             continue
 
         # 检查原始上下文后方是否紧随文献引用（如 \upcite 或 等工作/等人）
         mf_raw = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_raw)
         raw_after = all_body_raw[mf_raw.end(): min(len(all_body_raw), mf_raw.end() + 60)] if mf_raw else ""
-        if re.search(r"\\up?cite|\b等(?:人|工作|方法)\b", raw_after):
+        if re.search(r"\\(?:cite|upcite|citep|citet|autocite|parencite|textcite)|\b等(?:人|工作|方法|模型)\b", raw_after):
             cited_ext.append(ab)
         else:
             undef.append(ab)
@@ -821,12 +1011,23 @@ def main() -> int:
     for na, ca, nb, cb, dist in term_conflicts:
         W(f"  - 「{na}」({ca}次) vs 「{nb}」({cb}次) → 章节分布: [{dist}]")
 
-    # 封面与答辩必填预留字段待填提示
+    # 封面与答辩必填预留字段待填提示（支持多种国内高校经典模板宏命令与自定义扩展）
+    FRONT_CMDS = [
+        "defenddate", "defenseDate", "defensedate",
+        "englishadvisor", "advisoren", "advisorEn",
+        "shijian", "defenseTime",
+        "profone", "chairman", "committee", "committeeChair",
+        "where", "defensePlace",
+        "secretlevel", "classification",
+    ]
+    if "empty_front_cmds" in terms and isinstance(terms["empty_front_cmds"], list):
+        FRONT_CMDS = list(set(FRONT_CMDS + terms["empty_front_cmds"]))
+
     empty_front = []
     if master_file and master_file.exists():
         m_txt = raw_texts[master_file]
-        for cmd in ["defenddate", "englishadvisor", "shijian", "profone", "where"]:
-            m = re.search(r"\\" + cmd + r"\{([^}]*)\}", m_txt)
+        for cmd in FRONT_CMDS:
+            m = re.search(r"\\" + cmd + r"\s*\{([^}]*)\}", m_txt)
             if m and not m.group(1).strip():
                 empty_front.append(cmd)
     W(f"- 封面与答辩信息预留字段待填：**{len(empty_front)}** 项"

@@ -82,11 +82,23 @@ LaTeX 中 `figure`、`table`、`algorithm` 各自维护完全独立的编号计�
 
 ### 20. 文档类、宏包与通用软硬件名不等于未定义缩写
 
-`DUT-thesis-grd`（学校学位论文模板）、`NVIDIA`、`RTX`（GPU 硬件型号）、`SD`（Stable Diffusion 通用代称）、`IP`（IP-Adapter）属于标准技术环境或宏包标识，不属于正文需要额外给出学术定义的度量指标。
+各类高校学位论文模板文档类（如 `thuthesis`、`pkuthss`、`fduthesis`、`zjuthesis`、`DUT-thesis-grd` 等）、标准软硬件型号（如 `NVIDIA`、`RTX`、`CUDA`）及通用技术栈属于技术环境标识，不属于正文需要额外给出学术定义的自研度量指标。项目特有的基线代号可通过 `terms.json` 的 `extra_acr_stop` 灵活豁免。
 
 ### 21. 按文档物理包含顺序审阅，避免字母序误报
 
-LaTeX 工程应按主文件（如 `MA Thesis.tex`）中 `\include` / `\input` 的真实读取顺序（`chapter1` → `chapter2` → … → `app1`）确定各术语的“首现位置”。若按文件名字母排序，`app1.tex` 会排在 `chapter1.tex` 之前，导致在正文中早已明确定义的缩写（如 LRS 在第 1 章已定义全称）在附录被误判为“首现未定义”。
+LaTeX 工程应按主文件（如 `main.tex`）中 `\include` / `\input` 的真实读取顺序（`chapter1` → `chapter2` → … → `app1`）确定各术语的“首现位置”（支持多级子目录递归解析）。若按文件名字母排序，`app1.tex` 会排在 `chapter1.tex` 之前，导致在正文中早已明确定义的缩写在附录被误判为“首现未定义”。
+
+### 22. `\cref` 复合引用与宏包兼容
+
+现代 LaTeX 论文常用 `cleveref` 宏包进行复合引用（如 `\cref{fig:model,fig:ablation}`），或使用 `\autoref`、`\eqref`。解析引用时必须支持逗号分隔拆解与多宏包命令兼容，不可将合法复合引用误判为“未引用浮动体”。
+
+### 23. 专业图表类型与复合名词不等于幽灵引用
+
+工科与科技论文中，「混淆矩阵表中」「热力图中」「散点图中」「数据流图中」「甘特图中」属于专有图表类型或数据结构名词加方位词“中”，表示“在热力图内部”或“在混淆矩阵表中”，并非脱离环境指代正文浮动体插图，严禁误报。
+
+### 24. LaTeX 宏命令可选参数键值对不等于数学变量漏加 `$`
+
+在 `\includegraphics[width=0.8\textwidth]{...}` 或 `\lstset{scale=0.9}` 中，`width=0.8`、`scale=0.9` 等属于宏命令可选参数语法，严禁误判为正文单字母数学变量漏加 `$`。
 
 ## 二、绝对不能改
 
