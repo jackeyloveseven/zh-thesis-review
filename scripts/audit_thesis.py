@@ -116,15 +116,15 @@ AI_CLICHE_DEFAULT = (
 MATH_ENVS = (
     r"\$\$[\s\S]*?\$\$",
     r"(?<!\\)\$[^$\n]*?(?<!\\)\$",
-    r"\\begin\{(?:equation|align|gather|multline|eqnarray|displaymath|split|aligned|gathered|flalign)\*?\}[\s\S]*?"
-    r"\\end\{(?:equation|align|gather|multline|eqnarray|displaymath|split|aligned|gathered|flalign)\*?\}",
+    r"\\begin\{(?:equation|align|gather|multline|eqnarray|displaymath|split|aligned|gathered|flalign|alignat|xalignat)\*?\}[\s\S]*?"
+    r"\\end\{(?:equation|align|gather|multline|eqnarray|displaymath|split|aligned|gathered|flalign|alignat|xalignat)\*?\}",
     r"\\\[[\s\S]*?\\\]",
     r"\\\([\s\S]*?\\\)",
 )
 
 CODE_ENVS = (
-    r"\\begin\{(?:lstlisting|verbatim|minted)\*?\}[\s\S]*?"
-    r"\\end\{(?:lstlisting|verbatim|minted)\*?\}",
+    r"\\begin\{(?:lstlisting|verbatim|minted|Verbatim|listing|alltt)\*?\}[\s\S]*?"
+    r"\\end\{(?:lstlisting|verbatim|minted|Verbatim|listing|alltt)\*?\}",
 )
 
 ACR_STOP = {
@@ -181,6 +181,11 @@ DEFAULT_COMPOSITE_RULES = [
     },
 ]
 
+# 单参数引用命令正则（兼容 ref, cref, Cref, vref, Vref, autoref, eqref, pageref, cpageref, Cpageref）
+REF_CMD_SINGLE_RX = r"\\(?:(?:c|C|v|V)?ref|autoref|eqref|(?:c|C)?pageref)\{([^}]+)\}"
+# 范围双参数引用命令正则（如 \crefrange{a}{b}, \vrefrange{a}{b}）
+REF_CMD_RANGE_RX = r"\\(?:(?:c|C|v|V)?refrange)\{([^}]+)\}\{([^}]+)\}"
+
 
 def safe_eval_expr(expr_str: str, var_dict: dict) -> float:
     """安全解析并计算简单数学表达式，仅允许四则运算与 math 白名单函数。"""
@@ -224,7 +229,9 @@ def safe_eval_expr(expr_str: str, var_dict: dict) -> float:
             elif isinstance(node.op, ast.Mult):
                 return left * right
             elif isinstance(node.op, ast.Div):
-                return left / right if right != 0 else 0.0
+                if right == 0:
+                    raise ZeroDivisionError("除数为零")
+                return left / right
             elif isinstance(node.op, ast.Pow):
                 return left ** right
         elif isinstance(node, ast.UnaryOp):
@@ -242,6 +249,20 @@ def safe_eval_expr(expr_str: str, var_dict: dict) -> float:
     return _eval(tree)
 
 
+def strip_comments(text: str) -> str:
+    """去除 LaTeX 行内注释，正确处理 \\% 转义，标准化换行并保留行号完全一致。"""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    cleaned = []
+    for line in lines:
+        m = re.search(r"(?<!\\)(?:\\\\)*(%)", line)
+        if m:
+            cleaned.append(line[:m.start(1)])
+        else:
+            cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 def find_master_tex(root: Path) -> Path | None:
     """寻找主入口文件（包含 \\documentclass 与 \\begin{document}）。"""
     candidates = []
@@ -250,15 +271,17 @@ def find_master_tex(root: Path) -> Path | None:
         if any(part in SKIP_DIRS for part in rel_parts):
             continue
         try:
-            content = p.read_text(encoding="utf-8", errors="ignore")
+            content = strip_comments(p.read_text(encoding="utf-8", errors="ignore"))
             if "\\documentclass" in content and "\\begin{document}" in content:
                 candidates.append(p)
         except Exception:
             pass
     if candidates:
-        for c in candidates:
-            if any(k in c.stem.lower() for k in ["thesis", "main"]):
-                return c
+        # 优先考虑文件名包含 thesis 或 main 的候选，且路径层级更浅的优先
+        candidates.sort(key=lambda p: (
+            not any(k in p.stem.lower() for k in ["thesis", "main"]),
+            len(p.parts)
+        ))
         return candidates[0]
     return None
 
@@ -311,7 +334,7 @@ def get_tex_structure(root: Path):
         stem = p.stem.lower()
         if "abstract" in stem or "denotation" in stem:
             return (0, stem)
-        if "chapter" in stem:
+        if "chapter" in stem or "chap" in stem:
             nums = re.findall(r"\d+", stem)
             n = int(nums[0]) if nums else 0
             return (1, n, stem)
@@ -322,6 +345,12 @@ def get_tex_structure(root: Path):
         return (3, stem)
 
     unincluded.sort(key=sort_key)
+
+    # 兜底：若未发现主入口文件（如仅检查单个章节子目录），将所有未引用文件作为有序文件返回，避免全量漏检
+    if not master and unincluded:
+        ordered = unincluded.copy()
+        unincluded = []
+
     return master, ordered, unincluded
 
 
@@ -330,19 +359,6 @@ def iter_tex(root: Path):
     _, ordered, unincluded = get_tex_structure(root)
     for p in ordered + unincluded:
         yield p
-
-
-def strip_comments(text: str) -> str:
-    """去除 LaTeX 行内注释，正确处理 \\% 转义，保留换行以保证行号完全一致。"""
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        m = re.search(r"(?<!\\)(?:\\\\)*(%)", line)
-        if m:
-            cleaned.append(line[:m.start(1)])
-        else:
-            cleaned.append(line)
-    return "\n".join(cleaned)
 
 
 def non_prose_spans(text: str):
@@ -405,9 +421,9 @@ def load_terms(path: str, root: Path = None):
     if "term_pairs" in t and isinstance(t["term_pairs"], list):
         out["term_pairs"] = t["term_pairs"]
     if "acr_stop" in t and isinstance(t["acr_stop"], list):
-        out["acr_stop"] = set(t["acr_stop"])
+        out["acr_stop"] = {str(x).strip().upper() for x in t["acr_stop"] if str(x).strip()}
     if "extra_acr_stop" in t and isinstance(t["extra_acr_stop"], list):
-        out["extra_acr_stop"] = set(t["extra_acr_stop"])
+        out["extra_acr_stop"] = {str(x).strip().upper() for x in t["extra_acr_stop"] if str(x).strip()}
     if "composite_metrics" in t and isinstance(t["composite_metrics"], list):
         out["composite_metrics"] = t["composite_metrics"]
     if "empty_front_cmds" in t and isinstance(t["empty_front_cmds"], list):
@@ -415,6 +431,8 @@ def load_terms(path: str, root: Path = None):
 
     return out
 
+
+# ---------------- 核心检查功能函数 ----------------
 
 def verify_composite_tables(files, texts, rel, composite_rules=None):
     """机械核算表格中复合指标（如 ArtFID、SCH、F1 或自定义公式）数值自洽性。"""
@@ -426,7 +444,7 @@ def verify_composite_tables(files, texts, rel, composite_rules=None):
 
     for p in files:
         t = texts[p]
-        for tm in re.finditer(r"\\begin\{tabular\}\s*\{([^}]+)\}([\s\S]*?)\\end\{tabular\}", t):
+        for tm in re.finditer(r"\\begin\{tabular\*?\}\s*\{([^}]+)\}([\s\S]*?)\\end\{tabular\*?\}", t):
             body = tm.group(2)
             lines = [ln.strip() for ln in body.split(r"\\") if ln.strip()]
             if not lines:
@@ -461,10 +479,10 @@ def verify_composite_tables(files, texts, rel, composite_rules=None):
                 if idx_target in comp_indices.values():
                     continue
 
-                # 映射变量名并转换表达式
+                # 映射变量名并转换表达式，按长度逆序替换避免子串干扰
                 sanitized_formula = rule["formula"]
                 comp_var_map = {}
-                for comp in components:
+                for comp in sorted(components, key=len, reverse=True):
                     var_name = re.sub(r"[^A-Za-z0-9_]", "_", comp)
                     comp_var_map[comp] = var_name
                     sanitized_formula = re.sub(r"\b" + re.escape(comp) + r"\b", var_name, sanitized_formula)
@@ -475,24 +493,36 @@ def verify_composite_tables(files, texts, rel, composite_rules=None):
                 for row_idx, row in enumerate(lines[1:], start=2):
                     if "&" not in row:
                         continue
-                    cells = [re.sub(r"\\textbf\{([^}]+)\}", r"\1", c.strip()) for c in row.split("&")]
+                    # 清洗背景色与文字颜色命令，防止颜色参数（如 gray!20 中的 20）被误提取为数值
+                    clean_row = re.sub(r"\\(?:cellcolor|textcolor|color)(?:\[[^\]]*\])?\{[^}]*\}", "", row)
+                    # 清洗单元格排版命令（\textbf, \mathbf, \underline, \textit, \mathit 等）
+                    clean_row = re.sub(r"\\(?:textbf|mathbf|underline|textit|mathit|text)\{([^}]*)\}", r"\1", clean_row)
+                    cells = [c.strip() for c in clean_row.split("&")]
                     req_max = max([idx_target] + list(comp_indices.values()))
                     if len(cells) <= req_max:
                         continue
 
-                    m_target = re.search(r"\d+(?:\.\d+)?", cells[idx_target])
+                    # 提取数值（支持正负号与科学计数法）
+                    m_target = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", cells[idx_target])
                     if not m_target:
                         continue
-                    v_target = float(m_target.group(0))
+                    try:
+                        v_target = float(m_target.group(0))
+                    except ValueError:
+                        continue
 
                     v_dict = {}
                     all_comp_ok = True
                     for comp in components:
-                        m_c = re.search(r"\d+(?:\.\d+)?", cells[comp_indices[comp]])
+                        m_c = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", cells[comp_indices[comp]])
                         if not m_c:
                             all_comp_ok = False
                             break
-                        v_dict[comp_var_map[comp]] = float(m_c.group(0))
+                        try:
+                            v_dict[comp_var_map[comp]] = float(m_c.group(0))
+                        except ValueError:
+                            all_comp_ok = False
+                            break
 
                     if not all_comp_ok:
                         continue
@@ -515,6 +545,429 @@ def verify_composite_tables(files, texts, rel, composite_rules=None):
                     results.append(f"{target_name} 表 ({rel[p]}): {row_ok} 行自洽，{row_fail} 行不符")
 
     return results, inconsistencies
+
+
+def check_float_order(files, texts, rel):
+    """浮动体乱序检查（图、表、算法按前缀分别独立检查有序性）。"""
+    bad_float_order = []
+    for p in files:
+        t = texts[p]
+        for kind in ("fig", "tab", "alg"):
+            prefix = kind + ":"
+            defs = [lab.strip() for lab in re.findall(r"\\label\{\s*((?:fig|tab|alg):[^}]+?)\s*\}", t) if lab.strip().startswith(prefix)]
+            idx = {lab: i for i, lab in enumerate(defs)}
+            first = {}
+
+            # 匹配常规单参引用
+            for m in re.finditer(REF_CMD_SINGLE_RX, t):
+                for lab in [x.strip() for x in m.group(1).split(",")]:
+                    if lab.startswith(prefix):
+                        first.setdefault(lab, m.start())
+
+            # 匹配范围双参引用（\crefrange{a}{b}）
+            for m in re.finditer(REF_CMD_RANGE_RX, t):
+                for grp in (m.group(1), m.group(2)):
+                    for lab in [x.strip() for x in grp.split(",")]:
+                        if lab.startswith(prefix):
+                            first.setdefault(lab, m.start())
+
+            prev = -1
+            for lab, pos in sorted(first.items(), key=lambda kv: kv[1]):
+                if lab in idx and idx[lab] < prev:
+                    bad_float_order.append((rel[p], line_of(t, pos), lab))
+                prev = max(prev, idx.get(lab, prev))
+    return bad_float_order
+
+
+def check_ghost_floats(files, texts, rel):
+    """指代未带 \\ref 且周围无紧邻浮动体（排除特征图/计算图/散列表/混淆矩阵/热力图等学科专有数据结构与图表类型）。"""
+    ghost = []
+    ghost_rx = r"(?:表中|上表|下表|图中|上图|下图|见表|见图)"
+    ghost_exclude_prefixes = (
+        "散列", "哈希", "符号", "对照", "统计", "记录", "邻接", "状态", "路由", "查找",
+        "配置", "索引", "跳转", "真值", "特征", "计算", "网络", "因果", "关系", "拓扑",
+        "热力", "散点", "分布", "折线", "雷达", "混淆", "流程", "时序", "示意", "架构",
+        "结构", "数据流", "甘特", "框", "柱状", "箱线", "点云", "矩阵"
+    )
+
+    for p in files:
+        t = texts[p]
+        for m in re.finditer(ghost_rx, t):
+            matched_phrase = m.group(0)
+            pre = t[max(0, m.start() - 6): m.start()]
+            if any(pre.endswith(ex) for ex in ghost_exclude_prefixes):
+                continue
+
+            win = t[max(0, m.start() - 600): min(len(t), m.start() + 600)]
+
+            # 区分表格与插图分别校验紧邻环境与类型匹配的显式引用
+            is_table_ref = any(k in matched_phrase for k in ["表", "tabular"])
+            is_fig_ref = any(k in matched_phrase for k in ["图", "figure"])
+
+            has_valid_env = False
+            if is_table_ref:
+                if any(env in win for env in (r"\begin{table", r"\end{table", r"\begin{tabular", r"\end{tabular", r"\begin{sideway", r"\end{sideway")):
+                    has_valid_env = True
+                elif re.search(r"\\(?:(?:c|C|v|V)?ref|autoref|eqref|(?:c|C)?pageref)\{[^}]*tab:", win):
+                    has_valid_env = True
+            elif is_fig_ref:
+                if any(env in win for env in (r"\begin{figure", r"\end{figure", r"\begin{wrapfigure", r"\end{wrapfigure", r"\begin{minipage", r"\end{minipage", r"\begin{algorithm", r"\end{algorithm")):
+                    has_valid_env = True
+                elif re.search(r"\\(?:(?:c|C|v|V)?ref|autoref|eqref|(?:c|C)?pageref)\{[^}]*(?:fig|alg):", win):
+                    has_valid_env = True
+            else:
+                if (r"\ref{" in win or r"\cref{" in win or r"\begin{table" in win or r"\end{table" in win or r"\begin{figure" in win or r"\end{figure" in win):
+                    has_valid_env = True
+
+            if has_valid_env:
+                continue
+
+            ghost.append((rel[p], line_of(t, m.start()), matched_phrase))
+
+    return ghost
+
+
+def check_uncited_floats(ordered_files, texts):
+    """检查未被正文引用的浮动体。"""
+    all_text = "\n".join(texts[p] for p in ordered_files)
+    labels = set(re.findall(r"\\label\{\s*((?:fig|tab|alg):[^}]+?)\s*\}", all_text))
+    raw_refs = re.findall(REF_CMD_SINGLE_RX, all_text)
+    range_refs = re.findall(REF_CMD_RANGE_RX, all_text)
+
+    refs = set()
+    for item in raw_refs:
+        for x in item.split(","):
+            lab = x.strip()
+            if lab.startswith(("fig:", "tab:", "alg:")):
+                refs.add(lab)
+
+    for item_a, item_b in range_refs:
+        for grp in (item_a, item_b):
+            for x in grp.split(","):
+                lab = x.strip()
+                if lab.startswith(("fig:", "tab:", "alg:")):
+                    refs.add(lab)
+
+    uncited_floats = labels - refs
+    return labels, refs, uncited_floats
+
+
+def check_bib_citations(root: Path, all_text: str):
+    """检查参考文献总数、正文引用数与未引用文献。"""
+    bibs = [
+        b for b in sorted(root.rglob("*.bib"))
+        if not any(part in SKIP_DIRS for part in b.relative_to(root).parts[:-1])
+    ]
+    if not bibs:
+        return set(), set(), set()
+
+    keys = set()
+    for b in bibs:
+        raw_bib = strip_comments(b.read_text(encoding="utf-8", errors="ignore"))
+        # 排除 @comment, @string, @preamble
+        keys |= set(re.findall(r"@(?!(?:comment|string|preamble)\b)\w+\s*\{\s*([^,\s]+)\s*,", raw_bib, re.I))
+
+    cited = set()
+    # 兼容可选参数与各类宏包命令：\cite[p. 15]{...}, \citep[see][p. 20]{...}, \autocite[...]{...} 等
+    cite_rx = r"\\(?:cite|upcite|citep|citet|nocite|citeauthor|citeyear|autocite|parencite|textcite|footcite)(?:\[[^\]]*\])*\{([^}]+)\}"
+    raw_cites = re.findall(cite_rx, all_text)
+    for k in raw_cites:
+        for x in k.split(","):
+            val = x.strip()
+            if val:
+                cited.add(val)
+
+    uncited_bibs = keys - cited
+    return keys, cited, uncited_bibs
+
+
+def check_bare_math(files, texts, rel):
+    """检查未加 $ 的数学变量赋值（排除可选参数中包含的等号赋值）。"""
+    bare_math = []
+    for p in files:
+        t = texts[p]
+        spans = non_prose_spans(t)
+        # 屏蔽 LaTeX 可选参数（如 [width=0.8\textwidth]）与命令
+        clean_t = re.sub(r"\[[^\]]*\]", lambda m: " " * len(m.group(0)), t)
+        clean_t = re.sub(r"\\[a-zA-Z]+", lambda m: " " * len(m.group(0)), clean_t)
+        for m in re.finditer(r"(?<![\\$a-zA-Z])([A-Za-z]{1,2})\s*=\s*([-+]?\d+(?:\.\d+)?)", clean_t):
+            if in_spans(spans, m.start()):
+                continue
+            bare_math.append((rel[p], line_of(t, m.start()), m.group(0)))
+    return bare_math
+
+
+def check_acronyms(ordered_files, texts, deno_text, user_acr_stop):
+    """首现未定义缩写与外部文献基线识别。"""
+    body_files = [p for p in ordered_files if not any(x in p.stem.lower() for x in ["denotation", "pub", "thanks", "title", "cover"])]
+    body_clean_chunks = []
+    body_raw_chunks = []
+
+    for p in body_files:
+        t = texts[p]
+        spans = non_prose_spans(t)
+        chars = list(t)
+        for a, b in spans:
+            for i in range(a, min(b, len(chars))):
+                chars[i] = " "
+        masked = "".join(chars)
+        # 屏蔽 LaTeX 命令与键名，防止宏包名或模版名泄露为正文缩写
+        masked = re.sub(r"\\(?:documentclass|usepackage)(?:\[[^\]]*\])?\{[^}]*\}", " ", masked)
+        masked = re.sub(r"\\(?:cite|upcite|label|(?:c|C|v|V)?ref|autoref|eqref|(?:c|C)?pageref|input|include|bibliography|bibliographystyle)(?:\[[^\]]*\])*\{[^}]*\}", " ", masked)
+        masked = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", masked)
+        body_clean_chunks.append(masked)
+        body_raw_chunks.append(t)
+
+    all_body_clean = "\n".join(body_clean_chunks)
+    all_body_raw = "\n".join(body_raw_chunks)
+
+    undef = []
+    cited_ext = []
+    seen_ab = set()
+
+    for m in re.finditer(r"(?<![A-Za-z])[A-Z]{2,6}(?![A-Za-z])", all_body_clean):
+        ab = m.group(0)
+        if ab in user_acr_stop or ab in seen_ab:
+            continue
+        seen_ab.add(ab)
+
+        # 若在符号表中已有收录（无论是正文环境还是 \mathrm 等数学环境），不报错
+        if deno_text and re.search(r"(?:\\mathrm\{|\\operatorname\{|\\textbf\{|(?<![A-Za-z]))" + re.escape(ab) + r"(?:\}|(?![A-Za-z]))", deno_text):
+            continue
+
+        m_first = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_clean)
+        if not m_first:
+            continue
+        first = m_first.start()
+        win = all_body_clean[max(0, first - 300): first + 200]
+
+        # 兼容正文双向定义：全称（缩写）与 缩写（全称），以及表示、定义为、即等引导词
+        rx_def = r"(?:（[^）]*{0}[^）]*）|{0}\s*（[^）]+）|\([^)]*{0}[^)]*\)|{0}\s*\([^)]+\)|全称|定义为|表示|衡量|即|简记|记为|简称|代表)".format(re.escape(ab))
+        if re.search(rx_def, win):
+            continue
+
+        # 检查原始上下文后方是否紧随文献引用（如 \upcite 或 等工作/等人）
+        mf_raw = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_raw)
+        raw_after = all_body_raw[mf_raw.end(): min(len(all_body_raw), mf_raw.end() + 60)] if mf_raw else ""
+        if re.search(r"\\(?:cite|upcite|citep|citet|autocite|parencite|textcite)|\b等(?:人|工作|方法|模型)\b", raw_after):
+            cited_ext.append(ab)
+        else:
+            undef.append(ab)
+
+    return sorted(set(undef)), sorted(set(cited_ext)), all_body_clean
+
+
+def check_self_deprecation(files, texts, rel, self_dep_rx):
+    """盲审递刀与过度自贬检查（排除致谢文件）。"""
+    bad_self_dep = []
+    for p in files:
+        if any(k in p.stem.lower() for k in ["thanks", "ack", "致谢"]):
+            continue
+        t = texts[p]
+        for pos, s in all_hits(self_dep_rx, t):
+            start = max(0, pos - 20)
+            end = min(len(t), pos + len(s) + 35)
+            snippet = t[start:end].replace("\n", " ").strip()
+            bad_self_dep.append((rel[p], line_of(t, pos), s, snippet))
+    return bad_self_dep
+
+
+def check_subject_attribution(files, texts, rel, own_methods=None):
+    """方法章主体归属缺失检查（在第 3 章及以后的方法与核心分析章检查）。"""
+    bad_attr = []
+    own_methods = own_methods or []
+    own_methods_rx = None
+    if own_methods:
+        own_methods_rx = r"(?:" + "|".join(re.escape(m) for m in own_methods) + r")[^。]{0,25}(?:由|被|在文献|在论文)[^。]{0,10}(?:提出|发表|开源|设计)"
+
+    cn_digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+    for p in files:
+        posix_path = p.as_posix().lower()
+        nums = re.findall(r"\d+", p.stem)
+        ch_num = int(nums[0]) if nums else 0
+
+        # 支持识别中文大写章号，如“第三章”
+        m_cn = re.search(r"第([一二三四五六七八九十]+)章", posix_path)
+        if m_cn:
+            ch_num = max(ch_num, cn_digits.get(m_cn.group(1), 0))
+
+        # 检查是否为方法/实验核心章（第3章及以上或包含方法、算法等语义）
+        is_ch = any(k in posix_path for k in ["chapter", "chap", "ch", "章"]) or ch_num > 0
+        is_method_stem = any(k in posix_path for k in ["method", "approach", "framework", "model", "algorithm", "experiment"])
+
+        if (is_ch and ch_num >= 3) or is_method_stem:
+            t = texts[p]
+            for pos, s in all_hits(SUBJECT_ATTR_DEFAULT, t):
+                start = max(0, pos - 15)
+                end = min(len(t), pos + len(s) + 25)
+                snip = t[start:end].replace("\n", " ").strip()
+                bad_attr.append((rel[p], line_of(t, pos), s, snip))
+            if own_methods_rx:
+                for pos, s in all_hits(own_methods_rx, t):
+                    start = max(0, pos - 15)
+                    end = min(len(t), pos + len(s) + 25)
+                    snip = t[start:end].replace("\n", " ").strip()
+                    bad_attr.append((rel[p], line_of(t, pos), f"自身工作被外指「{s}」", snip))
+    return bad_attr
+
+
+def check_scale_conversion(files, texts, rel):
+    """跨协议尺度随意换算检查。"""
+    scale_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(SCALE_CONVERT_DEFAULT, t):
+            pre = t[max(0, pos - 15): pos]
+            if re.search(r"(?:不|不可|不能|不得|严禁|无需|不应|禁止|无须)", pre):
+                continue
+            start = max(0, pos - 15)
+            end = min(len(t), pos + len(s) + 25)
+            snip = t[start:end].replace("\n", " ").strip()
+            scale_hits.append((rel[p], line_of(t, pos), s, snip))
+    return scale_hits
+
+
+def check_composite_residue(files, texts, rel, composite_rx):
+    """小论文拼稿痕迹与合订残留。"""
+    composite_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(composite_rx, t):
+            start = max(0, pos - 15)
+            end = min(len(t), pos + len(s) + 25)
+            snip = t[start:end].replace("\n", " ").strip()
+            composite_hits.append((rel[p], line_of(t, pos), s, snip))
+    return composite_hits
+
+
+def check_first_person(files, texts, rel, first_person_rx):
+    """第一人称复数出戏检查（排除致谢文件）。"""
+    fp_hits = []
+    for p in files:
+        if any(k in p.stem.lower() for k in ["thanks", "ack", "致谢"]):
+            continue
+        t = texts[p]
+        for pos, s in all_hits(first_person_rx, t):
+            start = max(0, pos - 15)
+            end = min(len(t), pos + len(s) + 25)
+            snip = t[start:end].replace("\n", " ").strip()
+            fp_hits.append((rel[p], line_of(t, pos), s, snip))
+    return fp_hits
+
+
+def check_colloquial(files, texts, rel, colloquial_rx):
+    """机翻跳戏与非学术口语检查。"""
+    colloquial_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(colloquial_rx, t):
+            start = max(0, pos - 15)
+            end = min(len(t), pos + len(s) + 25)
+            snip = t[start:end].replace("\n", " ").strip()
+            colloquial_hits.append((rel[p], line_of(t, pos), s, snip))
+    return colloquial_hits
+
+
+def check_markdown_residue(files, texts, rel):
+    """Markdown 残留与占位符。"""
+    md_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(MARKDOWN_RESIDUE_RX, t):
+            md_hits.append((rel[p], line_of(t, pos), s.strip()))
+    return md_hits
+
+
+def check_meta_writing(files, texts, rel, meta_rx):
+    """元写作与辩护腔检查。"""
+    meta_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(meta_rx, t):
+            meta_hits.append((rel[p], line_of(t, pos), s))
+    return meta_hits
+
+
+def check_frac_math(files, texts, rel):
+    """翻译腔数学残留检查（如分母带小数 1/2.5、3/2.5，或乘倍数混写，排除 DOI 与文献编号）。"""
+    frac_math_hits = []
+    rx = r"(?:(?:\d+(?:\.\d+)?|\b[A-Za-z])\s*/\s*\d+\.\d+|\b[1-9]\d*(?:\.\d+)?\s*%\s*(?:左右)?的?\s*\d+(?:\.\d+)?\s*倍|[×*x]\s*\d+(?:\.\d+)?\s*倍|/\s*\d+\.\d+\s*倍)"
+    for p in files:
+        if any(k in p.stem.lower() for k in ["pub", "resume", "cv"]):
+            continue
+        t = texts[p]
+        for pos, s in all_hits(rx, t):
+            pre = t[max(0, pos - 15): pos]
+            if re.search(r"10\.\d{4,9}\s*$", pre) or "doi" in pre.lower():
+                continue
+            frac_math_hits.append((rel[p], line_of(t, pos), s))
+    return frac_math_hits
+
+
+def check_title_issues(master_file: Path | None, raw_texts: dict):
+    """封面长标题断行排版合规检查。"""
+    title_issues = []
+    if master_file and master_file.exists():
+        m_txt = raw_texts.get(master_file, "")
+        m_title = re.search(r"\\title\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}", m_txt)
+        if m_title:
+            opt, body = m_title.group(1), m_title.group(2)
+            if "\\\\" in body and not opt:
+                title_issues.append("主文件 \\title 包含断行 \\\\ 但未提供可选参数单行短标题（易导致页眉/声明页被劈开断行）")
+    return title_issues
+
+
+def check_term_pairs(chapter_files, texts, term_pairs):
+    """核心术语跨章译名分裂检查。"""
+    term_conflicts = []
+    for pair in term_pairs:
+        name_a, name_b = pair[0], pair[1]
+        cnt_a_total = 0
+        cnt_b_total = 0
+        dist = []
+        for cf in chapter_files:
+            t = texts[cf]
+            # 排除构词后缀（「提示语」在「提示语义」中不算独立术语）
+            ca = len(re.findall(name_a + r"(?!义|性|化|学)", t))
+            cb = len(re.findall(name_b + r"(?!义|性|化|学)", t))
+            cnt_a_total += ca
+            cnt_b_total += cb
+            if ca > 0 or cb > 0:
+                dist.append(f"{cf.stem}({ca}:{cb})")
+        if cnt_a_total > 0 and cnt_b_total > 0:
+            clean_b = re.sub(r"\(\?[^)]*\)", "", name_b)
+            term_conflicts.append((name_a, cnt_a_total, clean_b, cnt_b_total, ", ".join(dist)))
+    return term_conflicts
+
+
+def check_empty_front_fields(master_file: Path | None, raw_texts: dict, front_cmds: list):
+    """封面与答辩必填预留字段待填提示。"""
+    empty_front = []
+    if master_file and master_file.exists():
+        m_txt = raw_texts.get(master_file, "")
+        for cmd in front_cmds:
+            m = re.search(r"\\" + cmd + r"\s*\{([^}]*)\}", m_txt)
+            if m and not m.group(1).strip():
+                empty_front.append(cmd)
+    return empty_front
+
+
+def check_compile_log(log_path: Path | None):
+    """编译日志关键错误核验。"""
+    if not log_path or not log_path.exists():
+        return None
+    log = log_path.read_text(encoding="utf-8", errors="ignore")
+    results = []
+    for label, rx in (
+        ("Overfull hbox/vbox", r"Overfull "),
+        ("未定义引用 (reference undefined)", r"reference.*undefined"),
+        ("未定义引文 (Citation undefined)", r"Citation.*undefined"),
+        ("字体替换警告 (Font shape undefined)", r"Font shape.*undefined"),
+    ):
+        hits_count = len(re.findall(rx, log))
+        results.append((label, hits_count))
+    return results
 
 
 def main() -> int:
@@ -546,144 +999,42 @@ def main() -> int:
 
     # 1. 盲审递刀与过度自贬
     self_dep_rx = merge_rx(SELF_DEPRECATION_DEFAULT, terms.get("self_deprecate"))
-    bad_self_dep = []
-    for p in files:
-        if "thanks" in p.stem.lower():
-            continue
-        t = texts[p]
-        for pos, s in all_hits(self_dep_rx, t):
-            start = max(0, pos - 20)
-            end = min(len(t), pos + len(s) + 35)
-            snippet = t[start:end].replace("\n", " ").strip()
-            bad_self_dep.append((rel[p], line_of(t, pos), s, snippet))
+    bad_self_dep = check_self_deprecation(files, texts, rel, self_dep_rx)
     W(f"- 盲审递刀与过度自贬：**{len(bad_self_dep)}** 处（直陈缺陷/缺少核心实验/尚未验证，需改为正面适用边界界定）")
     for r, ln, s, snip in bad_self_dep[:10]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
-    # 2. 方法章主体归属缺失（仅在第 3 章及以后的方法与核心分析章检查）
-    bad_attr = []
-    own_methods = terms.get("own_methods") or []
-    own_methods_rx = None
-    if own_methods:
-        own_methods_rx = r"(?:" + "|".join(re.escape(m) for m in own_methods) + r")[^。]{0,25}(?:由|被|在文献|在论文)[^。]{0,10}(?:提出|发表|开源|设计)"
-
-    for p in files:
-        nums = re.findall(r"\d+", p.stem)
-        ch_num = int(nums[0]) if nums else 0
-        is_ch = any(k in p.stem.lower() for k in ["chapter", "chap", "ch"]) or ("chapters" in [part.lower() for part in p.parts])
-        if is_ch and ch_num >= 3:
-            t = texts[p]
-            for pos, s in all_hits(SUBJECT_ATTR_DEFAULT, t):
-                start = max(0, pos - 15)
-                end = min(len(t), pos + len(s) + 25)
-                snip = t[start:end].replace("\n", " ").strip()
-                bad_attr.append((rel[p], line_of(t, pos), s, snip))
-            if own_methods_rx:
-                for pos, s in all_hits(own_methods_rx, t):
-                    start = max(0, pos - 15)
-                    end = min(len(t), pos + len(s) + 25)
-                    snip = t[start:end].replace("\n", " ").strip()
-                    bad_attr.append((rel[p], line_of(t, pos), f"自身工作被外指「{s}」", snip))
+    # 2. 方法章主体归属缺失
+    bad_attr = check_subject_attribution(files, texts, rel, own_methods=terms.get("own_methods"))
     W(f"- 方法章主体归属缺失：**{len(bad_attr)}** 处（将自己工作写成外部复现或主体剥离）")
     for r, ln, s, snip in bad_attr[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
-    # 3. 浮动体乱序（图、表、算法按前缀分别独立检查有序性）
-    bad_float_order = []
-    for p in files:
-        t = texts[p]
-        for kind in ("fig", "tab", "alg"):
-            prefix = kind + ":"
-            defs = [lab for lab in re.findall(r"\\label\{((?:fig|tab|alg):[^}]+)\}", t) if lab.startswith(prefix)]
-            idx = {lab: i for i, lab in enumerate(defs)}
-            first = {}
-            for m in re.finditer(r"\\(?:ref|cref|Cref|autoref|eqref|pageref)\{([^}]+)\}", t):
-                for lab in [x.strip() for x in m.group(1).split(",")]:
-                    if lab.startswith(prefix):
-                        first.setdefault(lab, m.start())
-            prev = -1
-            for lab, pos in sorted(first.items(), key=lambda kv: kv[1]):
-                if lab in idx and idx[lab] < prev:
-                    bad_float_order.append((rel[p], line_of(t, pos), lab))
-                prev = max(prev, idx.get(lab, prev))
+    # 3. 浮动体乱序
+    bad_float_order = check_float_order(files, texts, rel)
     W(f"- 浮动体引用乱序：**{len(bad_float_order)}** 处（插图/表格/算法各自分立有序）")
     for r, ln, lab in bad_float_order[:10]:
         W(f"  - {r}:{ln} `{lab}`")
 
-    # 4. 指代未带 \ref 且周围无紧邻浮动体（排除特征图/计算图/散列表/混淆矩阵/热力图等学科专有数据结构与图表类型）
-    ghost = []
-    ghost_rx = r"(?:表中|上表|下表|图中|上图|下图|见表|见图)"
-    ghost_exclude_prefixes = (
-        "散列", "哈希", "符号", "对照", "统计", "记录", "邻接", "状态", "路由", "查找",
-        "配置", "索引", "跳转", "真值", "特征", "计算", "网络", "因果", "关系", "拓扑",
-        "热力", "散点", "分布", "折线", "雷达", "混淆", "流程", "时序", "示意", "架构",
-        "结构", "数据流", "甘特", "框", "柱状", "箱线", "点云", "矩阵"
-    )
-    for p in files:
-        t = texts[p]
-        for m in re.finditer(ghost_rx, t):
-            pre = t[max(0, m.start() - 6): m.start()]
-            if any(pre.endswith(ex) for ex in ghost_exclude_prefixes):
-                continue
-            win = t[max(0, m.start() - 400): min(len(t), m.start() + 400)]
-            # 若窗口内包含各类引用宏或紧邻各类表格/插图环境，视为正常就近指代
-            if (r"\ref{" in win or
-                r"\cref{" in win or
-                r"\Cref{" in win or
-                r"\autoref{" in win or
-                r"\pageref{" in win or
-                r"\begin{table" in win or
-                r"\begin{figure" in win or
-                r"\begin{tabular" in win or
-                r"\begin{sideway" in win or
-                r"\begin{wrapfigure" in win or
-                r"\begin{algorithm" in win or
-                r"\begin{minipage" in win):
-                continue
-            ghost.append((rel[p], line_of(t, m.start()), m.group(0)))
+    # 4. 指代未带 \ref 且周围无紧邻浮动体
+    ghost = check_ghost_floats(files, texts, rel)
     W(f"- 「表中/图中」脱离浮动体悬空指代：**{len(ghost)}** 处（前后400字内无 `\\ref` 且无浮动体环境）")
     for r, ln, w in ghost[:10]:
         W(f"  - {r}:{ln} 「{w}」")
 
     # 5. 未引用浮动体与文献
-    all_text = "\n".join(texts[p] for p in ordered_files)
-    labels = set(re.findall(r"\\label\{((?:fig|tab|alg):[^}]+)\}", all_text))
-    raw_refs = re.findall(r"\\(?:ref|cref|Cref|autoref|eqref|pageref)\{([^}]+)\}", all_text)
-    refs = set()
-    for item in raw_refs:
-        for x in item.split(","):
-            lab = x.strip()
-            if lab.startswith(("fig:", "tab:", "alg:")):
-                refs.add(lab)
-    uncited_floats = labels - refs
+    labels, refs, uncited_floats = check_uncited_floats(ordered_files, texts)
     W(f"- 未被引用的浮动体：**{len(uncited_floats)}** 个" + (f" → {sorted(uncited_floats)[:6]}" if uncited_floats else ""))
 
-    # 修正 bib 过滤，使用 relative_to 避免父路径包含 build/archive 时误判
-    bibs = [
-        b for b in sorted(root.rglob("*.bib"))
-        if not any(part in SKIP_DIRS for part in b.relative_to(root).parts[:-1])
-    ]
-    if bibs:
-        keys = set()
-        for b in bibs:
-            raw_bib = strip_comments(b.read_text(encoding="utf-8", errors="ignore"))
-            # 排除 @comment, @string, @preamble
-            keys |= set(re.findall(r"@(?!(?:comment|string|preamble)\b)\w+\s*\{\s*([^,\s]+)\s*,", raw_bib, re.I))
-        cited = set()
-        # 兼容各类标准与宏包引用命令：\cite, \upcite, \citep, \citet, \nocite, \autocite, \parencite, \textcite 等
-        raw_cites = re.findall(r"\\(?:cite|upcite|citep|citet|nocite|citeauthor|citeyear|autocite|parencite|textcite|footcite)\{([^}]+)\}", all_text)
-        for k in raw_cites:
-            for x in k.split(","):
-                val = x.strip()
-                if val:
-                    cited.add(val)
-        uncited_bibs = keys - cited
-        W(f"- 参考文献：{len(keys)} 条，正文引用 {len(cited)} 条，未引用 **{len(uncited_bibs)}** 条"
+    all_text = "\n".join(texts[p] for p in ordered_files)
+    bib_keys, cited_keys, uncited_bibs = check_bib_citations(root, all_text)
+    if bib_keys:
+        W(f"- 参考文献：{len(bib_keys)} 条，正文引用 {len(cited_keys)} 条，未引用 **{len(uncited_bibs)}** 条"
           + (f" → {sorted(uncited_bibs)[:5]}" if uncited_bibs else ""))
     else:
         W(f"- 参考文献：未在 `{root}` 下找到 .bib 文件（跳过未引用文献检查）")
 
-    # 6. 复合指标公式逐行验算（自洽性核算）
+    # 6. 复合指标公式逐行验算
     user_rules = DEFAULT_COMPOSITE_RULES.copy()
     if "composite_metrics" in terms and isinstance(terms["composite_metrics"], list):
         user_rules = terms["composite_metrics"] + user_rules
@@ -694,91 +1045,21 @@ def main() -> int:
         W(f"  - ⚠ {inc}")
 
     # 7. 跨协议尺度混用与随意换算
-    scale_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(SCALE_CONVERT_DEFAULT, t):
-            pre = t[max(0, pos - 15): pos]
-            if re.search(r"(?:不|不可|不能|不得|严禁|无需|不应|禁止|无须)", pre):
-                continue
-            start = max(0, pos - 15)
-            end = min(len(t), pos + len(s) + 25)
-            snip = t[start:end].replace("\n", " ").strip()
-            scale_hits.append((rel[p], line_of(t, pos), s, snip))
+    scale_hits = check_scale_conversion(files, texts, rel)
     W(f"- 跨协议尺度随意换算：**{len(scale_hits)}** 处（不同协议指标相除/换算/统一打分）")
     for r, ln, s, snip in scale_hits[:6]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
     # 8. math mode 单字母变量未加 $
-    bare_math = []
-    for p in files:
-        t = texts[p]
-        spans = non_prose_spans(t)
-        # 屏蔽 LaTeX 可选参数（如 [width=0.8\textwidth]）与命令
-        clean_t = re.sub(r"\[[^\]]*\]", lambda m: " " * len(m.group(0)), t)
-        clean_t = re.sub(r"\\[a-zA-Z]+", lambda m: " " * len(m.group(0)), clean_t)
-        for m in re.finditer(r"(?<![\\$a-zA-Z])([A-Za-z]{1,2})\s*=\s*(\d+(?:\.\d+)?)", clean_t):
-            if in_spans(spans, m.start()):
-                continue
-            bare_math.append((rel[p], line_of(t, m.start()), m.group(0)))
+    bare_math = check_bare_math(files, texts, rel)
     W(f"- 数学变量漏加 `$`：**{len(bare_math)}** 处 {bare_math[:4]}")
 
-    # 9. 缩写首现未定义（区分作者未定义缩写 vs 已正规引用的外部文献基线）
-    body_files = [p for p in ordered_files if not any(x in p.stem.lower() for x in ["denotation", "pub", "thanks", "title", "cover"])]
+    # 9. 缩写首现未定义
     deno_file = next((p for p in files if any(x in p.stem.lower() for x in ["denotation", "symbol", "notation", "abbr"])), None)
     deno_text = deno_file.read_text(encoding="utf-8", errors="ignore") if deno_file else ""
-
-    body_clean_chunks = []
-    body_raw_chunks = []
-    for p in body_files:
-        t = texts[p]
-        spans = non_prose_spans(t)
-        chars = list(t)
-        for a, b in spans:
-            for i in range(a, min(b, len(chars))):
-                chars[i] = " "
-        masked = "".join(chars)
-        # 屏蔽 LaTeX 命令与键名，防止宏包名或模版名泄露为正文缩写
-        masked = re.sub(r"\\(?:documentclass|usepackage)(?:\[[^\]]*\])?\{[^}]*\}", " ", masked)
-        masked = re.sub(r"\\(?:cite|upcite|label|ref|cref|Cref|autoref|pageref|input|include|bibliography|bibliographystyle)\{[^}]*\}", " ", masked)
-        masked = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", masked)
-        body_clean_chunks.append(masked)
-        body_raw_chunks.append(t)
-    all_body_clean = "\n".join(body_clean_chunks)
-    all_body_raw = "\n".join(body_raw_chunks)
-
     user_acr_stop = ACR_STOP | terms.get("acr_stop", set()) | terms.get("extra_acr_stop", set())
-    undef = []
-    cited_ext = []
-    seen_ab = set()
-    for m in re.finditer(r"(?<![A-Za-z])[A-Z]{2,6}(?![A-Za-z])", all_body_clean):
-        ab = m.group(0)
-        if ab in user_acr_stop or ab in seen_ab:
-            continue
-        seen_ab.add(ab)
-        # 若在符号表中已有收录（无论是正文环境还是 \mathrm 等数学环境），不报错
-        if deno_text and re.search(r"(?:\\mathrm\{|\\operatorname\{|\\textbf\{|(?<![A-Za-z]))" + re.escape(ab) + r"(?:\}|(?![A-Za-z]))", deno_text):
-            continue
-        m_first = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_clean)
-        if not m_first:
-            continue
-        first = m_first.start()
-        win = all_body_clean[max(0, first - 300): first + 200]
-        # 兼容正文双向定义：全称（缩写）与 缩写（全称），以及表示、定义为、即等引导词
-        rx_def = r"(?:（[^）]*{0}[^）]*）|{0}\s*（[^）]+）|\([^)]*{0}[^)]*\)|{0}\s*\([^)]+\)|全称|定义为|表示|衡量|即|简记|记为|简称|代表)".format(re.escape(ab))
-        if re.search(rx_def, win):
-            continue
 
-        # 检查原始上下文后方是否紧随文献引用（如 \upcite 或 等工作/等人）
-        mf_raw = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_raw)
-        raw_after = all_body_raw[mf_raw.end(): min(len(all_body_raw), mf_raw.end() + 60)] if mf_raw else ""
-        if re.search(r"\\(?:cite|upcite|citep|citet|autocite|parencite|textcite)|\b等(?:人|工作|方法|模型)\b", raw_after):
-            cited_ext.append(ab)
-        else:
-            undef.append(ab)
-
-    uniq_undef = sorted(set(undef))
-    uniq_cited = sorted(set(cited_ext))
+    uniq_undef, uniq_cited, all_body_clean = check_acronyms(ordered_files, texts, deno_text, user_acr_stop)
     W(f"- 疑似首现未定义的缩写/指标：**{len(uniq_undef)}** 个" + (f" → `{uniq_undef[:10]}`" if uniq_undef else ""))
     if uniq_cited:
         W(f"- 外部文献/基线方法名称（正文紧邻学术引文，属正当引用）：**{len(uniq_cited)}** 个 → `{uniq_cited[:8]}`")
@@ -794,90 +1075,48 @@ def main() -> int:
     # ==================== L1 出戏与缝合项 ====================
     W("\n## 二、L1 出戏与机翻缝合项\n")
 
-    # 1. 拼稿痕迹与小论文残留（补充材料、两篇、篇幅限制等）
+    # 1. 拼稿痕迹与小论文残留
     composite_rx = merge_rx(COMPOSITE_DEFAULT, terms.get("composite"))
-    composite_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(composite_rx, t):
-            start = max(0, pos - 15)
-            end = min(len(t), pos + len(s) + 25)
-            snip = t[start:end].replace("\n", " ").strip()
-            composite_hits.append((rel[p], line_of(t, pos), s, snip))
+    composite_hits = check_composite_residue(files, texts, rel, composite_rx)
     W(f"- 拼稿痕迹与小论文残留：**{len(composite_hits)}** 处（多论文拼接/补充材料/篇幅限制/合订）")
     for r, ln, s, snip in composite_hits[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
     # 2. 第一人称出戏（“我们”）
     first_person_rx = merge_rx(FIRST_PERSON_DEFAULT, terms.get("first_person"))
-    fp_hits = []
-    for p in files:
-        if "thanks" in p.stem.lower():
-            continue
-        t = texts[p]
-        for pos, s in all_hits(first_person_rx, t):
-            start = max(0, pos - 15)
-            end = min(len(t), pos + len(s) + 25)
-            snip = t[start:end].replace("\n", " ").strip()
-            fp_hits.append((rel[p], line_of(t, pos), s, snip))
+    fp_hits = check_first_person(files, texts, rel, first_person_rx)
     W(f"- 第一人称复数出戏（“我们”）：**{len(fp_hits)}** 处（学位论文属独立成果，除致谢外应改为“本文/实测表明”）")
     for r, ln, s, snip in fp_hits[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
     # 3. 机翻跳戏与非学术口语
     colloquial_rx = merge_rx(COLLOQUIAL_DEFAULT, terms.get("colloquial"))
-    colloquial_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(colloquial_rx, t):
-            start = max(0, pos - 15)
-            end = min(len(t), pos + len(s) + 25)
-            snip = t[start:end].replace("\n", " ").strip()
-            colloquial_hits.append((rel[p], line_of(t, pos), s, snip))
+    colloquial_hits = check_colloquial(files, texts, rel, colloquial_rx)
     W(f"- 机翻跳戏与出格口语：**{len(colloquial_hits)}** 处（轻佻词汇/指代不明/跨环境泄漏）")
     for r, ln, s, snip in colloquial_hits[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
     # 4. Markdown 残留与占位符
-    md_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(MARKDOWN_RESIDUE_RX, t):
-            md_hits.append((rel[p], line_of(t, pos), s.strip()))
+    md_hits = check_markdown_residue(files, texts, rel)
     W(f"- Markdown 标记或 TODO 占位残留：**{len(md_hits)}** 处")
     for r, ln, s in md_hits[:6]:
         W(f"  - {r}:{ln} `{s}`")
 
     # 5. 元写作与辩护腔
     meta_rx = merge_rx(META_DEFAULT, terms.get("meta"))
-    meta_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(meta_rx, t):
-            meta_hits.append((rel[p], line_of(t, pos), s))
+    meta_hits = check_meta_writing(files, texts, rel, meta_rx)
     W(f"- 元写作与辩护腔：**{len(meta_hits)}** 处")
     for r, ln, s in meta_hits[:6]:
         W(f"  - {r}:{ln} 「{s}」")
 
-    # 6. 翻译腔数学残留（如 1/2.5、分母带小数）
-    frac_math_hits = []
-    for p in files:
-        t = texts[p]
-        for pos, s in all_hits(r"1/\d+\.\d+|/\s*\d+\.\d+\s*倍", t):
-            frac_math_hits.append((rel[p], line_of(t, pos), s))
+    # 6. 翻译腔数学残留
+    frac_math_hits = check_frac_math(files, texts, rel)
     W(f"- 翻译腔数学残留（如分母带小数）：**{len(frac_math_hits)}** 处")
     for r, ln, s in frac_math_hits[:6]:
         W(f"  - {r}:{ln} 「{s}」")
 
-    # 7. 封面长标题断行与单行页眉兼顾
-    title_issues = []
-    if master_file and master_file.exists():
-        m_txt = raw_texts[master_file]
-        m_title = re.search(r"\\title\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}", m_txt)
-        if m_title:
-            opt, body = m_title.group(1), m_title.group(2)
-            if "\\\\" in body and not opt:
-                title_issues.append("主文件 \\title 包含断行 \\\\ 但未提供可选参数单行短标题（易导致页眉/声明页被劈开断行）")
+    # 7. 封面长标题断行排版
+    title_issues = check_title_issues(master_file, raw_texts)
     W(f"- 封面长标题断行排版合规：**{len(title_issues)}** 处问题"
       + ("（已使用双参数解耦封面换行与单行页眉）" if not title_issues else ""))
     for ti in title_issues:
@@ -900,11 +1139,9 @@ def main() -> int:
                 le = t.find("\n", pos)
                 line = t[ls: le if le > 0 else len(t)]
                 pre = t[max(0, pos - 14): pos]
-                # 已带中文括注（…（英文）…）视为合规
                 if "（" in pre or "(" in pre:
                     skipped += 1
                     continue
-                # 数据集编号语境（编号 sty00 至 sty39 / $c_{00}$）视为合规
                 if re.search(r"编号|至\s*[A-Za-z]*\d{2}|_\{\d+\}", line):
                     skipped += 1
                     continue
@@ -929,13 +1166,12 @@ def main() -> int:
     W(f"- 否定转折：{neg_count} 次 / {cjk_count} 汉字（每千字 **{neg_density:.1f}** 次）"
       + (" → 偏密（>3.0/千字）" if neg_density > 3.0 else ""))
 
-    # AI 破折号密度（包含全角破折号与 LaTeX 三连字 ---）
     dash_count = len(re.findall(r"——|(?<!-)(?:---)(?!-)", all_text))
     dash_density = dash_count / max(cjk_count, 1) * 1000
     W(f"- 破折号「——/---」：{dash_count} 次（每千字 **{dash_density:.2f}** 次）"
       + (" → 堆叠过密（>1.5/千字），具明显 AI 补充说明痕迹" if dash_density > 1.5 else ""))
 
-    # 特征连词与空泛升华（逐文件定位）
+    # 特征连词与空泛升华
     cliche_hits = []
     for p in files:
         t = texts[p]
@@ -948,7 +1184,7 @@ def main() -> int:
     for r, ln, s, snip in cliche_hits[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
-    # AI 宏大时空套话（逐文件定位）
+    # AI 宏大时空套话
     ai_cliche_rx = merge_rx(AI_CLICHE_DEFAULT, terms.get("ai_cliche"))
     ai_cliches = []
     for p in files:
@@ -962,7 +1198,7 @@ def main() -> int:
     for r, ln, s, snip in ai_cliches[:8]:
         W(f"  - {r}:{ln} 「{s}」→ `{snip}`")
 
-    # 小节段末自卫（大小写不敏感匹配各类 BiSection / Section / Subsection）
+    # 小节段末自卫
     selfdef = 0
     for p in files:
         t = texts[p]
@@ -987,31 +1223,13 @@ def main() -> int:
             seen_pairs.add(key)
             term_pairs.append(pair)
 
-    chapter_files = [p for p in files if "chapter" in p.stem.lower()]
-    term_conflicts = []
-    for pair in term_pairs:
-        name_a, name_b = pair[0], pair[1]
-        cnt_a_total = 0
-        cnt_b_total = 0
-        dist = []
-        for cf in chapter_files:
-            t = texts[cf]
-            # 排除构词后缀（「提示语」在「提示语义」中不算独立术语）
-            ca = len(re.findall(name_a + r"(?!义|性|化|学)", t))
-            cb = len(re.findall(name_b + r"(?!义|性|化|学)", t))
-            cnt_a_total += ca
-            cnt_b_total += cb
-            if ca > 0 or cb > 0:
-                dist.append(f"{cf.stem}({ca}:{cb})")
-        if cnt_a_total > 0 and cnt_b_total > 0:
-            clean_b = re.sub(r"\(\?[^)]*\)", "", name_b)
-            term_conflicts.append((name_a, cnt_a_total, clean_b, cnt_b_total, ", ".join(dist)))
-
+    chapter_files = [p for p in files if "chapter" in p.stem.lower() or "chap" in p.stem.lower()]
+    term_conflicts = check_term_pairs(chapter_files, texts, term_pairs)
     W(f"- 核心术语跨章译名分裂：**{len(term_conflicts)}** 组（由多篇小论文合成时最易发生）")
     for na, ca, nb, cb, dist in term_conflicts:
         W(f"  - 「{na}」({ca}次) vs 「{nb}」({cb}次) → 章节分布: [{dist}]")
 
-    # 封面与答辩必填预留字段待填提示（支持多种国内高校经典模板宏命令与自定义扩展）
+    # 封面与答辩必填预留字段
     FRONT_CMDS = [
         "defenddate", "defenseDate", "defensedate",
         "englishadvisor", "advisoren", "advisorEn",
@@ -1023,13 +1241,7 @@ def main() -> int:
     if "empty_front_cmds" in terms and isinstance(terms["empty_front_cmds"], list):
         FRONT_CMDS = list(set(FRONT_CMDS + terms["empty_front_cmds"]))
 
-    empty_front = []
-    if master_file and master_file.exists():
-        m_txt = raw_texts[master_file]
-        for cmd in FRONT_CMDS:
-            m = re.search(r"\\" + cmd + r"\s*\{([^}]*)\}", m_txt)
-            if m and not m.group(1).strip():
-                empty_front.append(cmd)
+    empty_front = check_empty_front_fields(master_file, raw_texts, FRONT_CMDS)
     W(f"- 封面与答辩信息预留字段待填：**{len(empty_front)}** 项"
       + (f" → `\\{empty_front}`（需作者按学院答辩通知填齐）" if empty_front else "（已填齐）"))
 
@@ -1044,7 +1256,6 @@ def main() -> int:
             log_file = root / args.log
 
     if not log_file:
-        # 自动搜索常见编译日志路径（按最后修改时间取最新）
         search_dirs = [root, root / "build", root / "out" / "build", root.parent / "build", root.parent / "out" / "build"]
         for d in search_dirs:
             if d.is_dir():
@@ -1059,16 +1270,10 @@ def main() -> int:
                     log_file = logs[0]
                     break
 
-    if log_file and log_file.exists():
-        log = log_file.read_text(encoding="utf-8", errors="ignore")
+    log_results = check_compile_log(log_file)
+    if log_results:
         W(f"（核验日志：`{log_file.resolve()}`）\n")
-        for label, rx in (
-            ("Overfull hbox/vbox", r"Overfull "),
-            ("未定义引用 (reference undefined)", r"reference.*undefined"),
-            ("未定义引文 (Citation undefined)", r"Citation.*undefined"),
-            ("字体替换警告 (Font shape undefined)", r"Font shape.*undefined"),
-        ):
-            hits_count = len(re.findall(rx, log))
+        for label, hits_count in log_results:
             W(f"- {label}: **{hits_count}**")
     else:
         W("- 未提供 `--log` 且未在常用目录自动找到编译日志")
