@@ -48,19 +48,27 @@
 `scripts/audit_thesis.py` 做机械统计，覆盖人手容易漏的部分：
 
 ```bash
-python scripts/audit_thesis.py <论文源码目录>
+python scripts/audit_thesis.py <论文源码目录> [--terms terms.json] [--log build/main.log]
 ```
 
-输出各章字数、引用数量与近五年文献比例，作为人工审查的起点，不替代判断。
+自动进行 L0--L3 四级机械检查（浮动体乱序、幽灵表图、首现未定义缩写、盲审自贬递刀、小论文合订与机翻残留、第一人称复数、AI 时空套话与破折号密度、术语跨章分裂、编译日志核验等），为人工逐章深度审读扫清硬伤。
+
+## 配套文件与规范
+
+- [`SKILL.md`](SKILL.md)：核心技能规范与「每章八问」审读指引。
+- [`references/checks.md`](references/checks.md)：L0--L3 逐级判定标准与正则规则库。
+- [`references/metric-registry.md`](references/metric-registry.md)：指标登记表规范（防“缩写对、全称错”、复合指标逐行验算）。
+- [`references/false-positives.md`](references/false-positives.md)：已确认误报清单与反模式（防二次改错）。
+- [`references/report-template.md`](references/report-template.md)：结构化终审报告骨架。
+- [`references/terms.example.json`](references/terms.example.json)：项目专有词表模板（内部代号、裸用英文、自贬与口语词）。
+- [`scripts/audit_thesis.py`](scripts/audit_thesis.py)：一键式机械静态检查脚本。
 
 ## 不适用
 
 - 选题、实验设计、补实验（本 skill 只审已有内容）
 - 从零起草与大段改写（那是写作，不是审查）
-- 英文期刊论文
+- 英文期刊论文（建议使用针对英文论文的审稿 pipeline）
 
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
-
-咕咕嘎嘎

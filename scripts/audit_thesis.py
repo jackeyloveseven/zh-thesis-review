@@ -119,6 +119,8 @@ ACR_STOP = {
     "TPAMI", "DPM", "FF", "MLP", "CNN", "RNN", "GAN", "VAE", "KL", "L2", "L1", "ViT", "LLM",
     "GB", "MB", "KB", "TB", "PB", "FPS", "HZ", "KHZ", "MHZ", "GHZ", "MS", "SEC", "MIN",
     "AI", "ML", "DL", "NLP", "CV", "RL", "SOTA", "CUDA", "ASCII", "UTF", "BERT", "GPT",
+    # 领域通用指标、视觉基线与硬件宏包
+    "FID", "LPIPS", "PSNR", "SSIM", "SD", "SDXL", "EDM", "IP", "DUT", "RTX", "NVIDIA",
 }
 
 DEFAULT_TERM_PAIRS = [
@@ -132,11 +134,74 @@ DEFAULT_TERM_PAIRS = [
 ]
 
 
-def iter_tex(root: Path):
-    for p in sorted(root.rglob("*.tex")):
+def find_master_tex(root: Path) -> Path | None:
+    """寻找主入口文件（包含 \\documentclass 与 \\begin{document}）。"""
+    candidates = []
+    for p in root.rglob("*.tex"):
         rel_parts = p.relative_to(root).parts[:-1]
         if any(part in SKIP_DIRS for part in rel_parts):
             continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="ignore")
+            if "\\documentclass" in content and "\\begin{document}" in content:
+                candidates.append(p)
+        except Exception:
+            pass
+    if candidates:
+        for c in candidates:
+            if any(k in c.stem.lower() for k in ["thesis", "main"]):
+                return c
+        return candidates[0]
+    return None
+
+
+def iter_tex(root: Path):
+    """按主文件物理包含顺序组织遍历，保证首现缩写按阅读流判定，避免附录超前判定。"""
+    master = find_master_tex(root)
+    ordered = []
+    seen = set()
+
+    if master:
+        ordered.append(master)
+        seen.add(master.resolve())
+        m_txt = strip_comments(master.read_text(encoding="utf-8", errors="ignore"))
+        for m in re.finditer(r"\\(?:include|input)\{([^}]+)\}", m_txt):
+            target = m.group(1).strip()
+            if not target.endswith(".tex"):
+                target_tex = target + ".tex"
+            else:
+                target_tex = target
+            for cand in ((master.parent / target_tex).resolve(), (root / target_tex).resolve()):
+                if cand.exists() and cand not in seen:
+                    ordered.append(cand)
+                    seen.add(cand)
+                    break
+
+    remaining = []
+    for p in root.rglob("*.tex"):
+        rel_parts = p.relative_to(root).parts[:-1]
+        if any(part in SKIP_DIRS for part in rel_parts):
+            continue
+        if p.resolve() not in seen:
+            remaining.append(p)
+
+    def sort_key(p: Path):
+        stem = p.stem.lower()
+        if "abstract" in stem or "denotation" in stem:
+            return (0, stem)
+        if "chapter" in stem:
+            nums = re.findall(r"\d+", stem)
+            n = int(nums[0]) if nums else 0
+            return (1, n, stem)
+        if "app" in stem:
+            nums = re.findall(r"\d+", stem)
+            n = int(nums[0]) if nums else 0
+            return (2, n, stem)
+        return (3, stem)
+
+    remaining.sort(key=sort_key)
+    ordered.extend(remaining)
+    for p in ordered:
         yield p
 
 
@@ -338,7 +403,8 @@ def main() -> int:
             for i in range(a, min(b, len(chars))):
                 chars[i] = " "
         masked = "".join(chars)
-        # 屏蔽 LaTeX 命令与键名
+        # 屏蔽 LaTeX 命令与键名，防止宏包名或模版名泄露为正文缩写
+        masked = re.sub(r"\\(?:documentclass|usepackage)(?:\[[^\]]*\])?\{[^}]*\}", " ", masked)
         masked = re.sub(r"\\(?:cite|upcite|label|ref|pageref|input|include|bibliography|bibliographystyle)\{[^}]*\}", " ", masked)
         masked = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", masked)
         body_clean_chunks.append(masked)
@@ -349,8 +415,8 @@ def main() -> int:
         ab = m.group(0)
         if ab in ACR_STOP:
             continue
-        # 若在符号表中已有收录，不报错
-        if deno_text and re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", deno_text):
+        # 若在符号表中已有收录（无论是正文环境还是 \mathrm 等数学环境），不报错
+        if deno_text and re.search(r"(?:\\mathrm\{|\\operatorname\{|(?<![A-Za-z]))" + re.escape(ab) + r"(?:\}|(?![A-Za-z]))", deno_text):
             continue
         m_first = re.search(r"(?<![A-Za-z])" + re.escape(ab) + r"(?![A-Za-z])", all_body_clean)
         if not m_first:
@@ -439,7 +505,17 @@ def main() -> int:
     for r, ln, s in meta_hits[:6]:
         W(f"  - {r}:{ln} 「{s}」")
 
-    # 6. 项目词表专有字段（内部代号、裸用英文）
+    # 6. 翻译腔数学残留（如 1/2.5、分母带小数）
+    frac_math_hits = []
+    for p in files:
+        t = texts[p]
+        for pos, s in all_hits(r"1/\d+\.\d+|/\s*\d+\.\d+\s*倍", t):
+            frac_math_hits.append((rel[p], line_of(t, pos), s))
+    W(f"- 翻译腔数学残留（如分母带小数）：**{len(frac_math_hits)}** 处")
+    for r, ln, s in frac_math_hits[:6]:
+        W(f"  - {r}:{ln} 「{s}」")
+
+    # 7. 项目词表专有字段（内部代号、裸用英文）
     for name, key in (("内部代号", "codename"), ("裸用英文术语", "bare_en")):
         rx = terms.get(key)
         if not rx:
@@ -565,8 +641,33 @@ def main() -> int:
 
     # ==================== 编译日志核验 ====================
     W("\n## 五、编译日志核验\n")
-    if args.log and Path(args.log).exists():
-        log = Path(args.log).read_text(encoding="utf-8", errors="ignore")
+    log_file = None
+    if args.log:
+        p_log = Path(args.log)
+        if p_log.exists():
+            log_file = p_log
+        elif (root / args.log).exists():
+            log_file = root / args.log
+
+    if not log_file:
+        # 自动搜索常见编译日志路径（按最后修改时间取最新）
+        search_dirs = [root, root / "build", root / "out" / "build", root.parent / "build", root.parent / "out" / "build"]
+        for d in search_dirs:
+            if d.is_dir():
+                logs = sorted(d.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+                for lg in logs:
+                    if any(x in lg.name.lower() for x in ["main", "thesis"]):
+                        log_file = lg
+                        break
+                if log_file:
+                    break
+                if logs:
+                    log_file = logs[0]
+                    break
+
+    if log_file and log_file.exists():
+        log = log_file.read_text(encoding="utf-8", errors="ignore")
+        W(f"（核验日志：`{log_file.resolve()}`）\n")
         for label, rx in (
             ("Overfull hbox/vbox", r"Overfull "),
             ("未定义引用 (reference undefined)", r"reference.*undefined"),
@@ -576,7 +677,7 @@ def main() -> int:
             hits_count = len(re.findall(rx, log))
             W(f"- {label}: **{hits_count}**")
     else:
-        W("- 未提供 `--log` 或日志文件不存在")
+        W("- 未提供 `--log` 且未在常用目录自动找到编译日志")
 
     W("\n---\n> 说明：机械项只覆盖结构、密度与特征词。主体归属、语义逻辑、跨章指代、指标定义，请对照 SKILL.md 的「每章八问」人工逐章通读核验。")
 
